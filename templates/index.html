@@ -1,0 +1,1233 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KRX Quant Simulator Web (v1.2.2)</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js for rendering graphs -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', 'Pretendard', sans-serif;
+            background-color: #f3f4f6;
+        }
+
+        .tab-btn.active {
+            border-bottom: 2px solid #2563eb;
+            color: #2563eb;
+            font-weight: 600;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .loading-spinner {
+            border-top-color: #3498db;
+            animation: spinner 1.5s linear infinite;
+        }
+
+        @keyframes spinner {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body class="text-gray-800">
+
+    <div class="max-w-7xl mx-auto p-4 lg:p-8">
+
+        <header class="bg-white shadow-sm rounded-lg p-6 mb-6 flex justify-between items-center">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-900 flex items-center gap-3">
+                    KRX Quant Simulator
+                    <a href="/manual" target="_blank"
+                        class="text-sm bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1 rounded-full font-normal transition-colors flex items-center gap-1">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477-4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                        </svg>
+                        사용설명서
+                    </a>
+                </h1>
+                <p class="text-sm text-gray-500 mt-1">Web-based Backtesting Engine v1.3.0</p>
+            </div>
+            <div class="text-right text-xs text-gray-400">
+                <p>Developed by 한양대학교 김현호</p>
+                <p>Contact hh09080@naver.com</p>
+            </div>
+        </header>
+
+        <!-- Navigation Tabs -->
+        <nav class="flex border-b border-gray-200 mb-6 font-medium text-gray-500 overflow-x-auto">
+            <button onclick="switchTab('config')" id="btn-config"
+                class="tab-btn active px-6 py-3 hover:text-blue-600 transition-colors whitespace-nowrap">0. 기본정보
+                입력</button>
+            <button onclick="switchTab('fast')" id="btn-fast"
+                class="tab-btn px-6 py-3 hover:text-blue-600 transition-colors whitespace-nowrap">1. 빠른
+                백테스팅</button>
+            <button onclick="switchTab('filter')" id="btn-filter"
+                class="tab-btn px-6 py-3 hover:text-blue-600 transition-colors whitespace-nowrap">2. 재무
+                필터링</button>
+            <button onclick="switchTab('backtest')" id="btn-backtest"
+                class="tab-btn px-6 py-3 hover:text-blue-600 transition-colors whitespace-nowrap">3. 전략 설정 &
+                시뮬레이션</button>
+            <button onclick="switchTab('results')" id="btn-results"
+                class="tab-btn px-6 py-3 hover:text-blue-600 transition-colors whitespace-nowrap">4. 시뮬레이션 결과</button>
+            <button onclick="switchTab('memories')" id="btn-memories"
+                class="tab-btn px-6 py-3 hover:text-blue-600 transition-colors whitespace-nowrap flex items-center gap-2">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10">
+                    </path>
+                </svg>
+                Memories (저장소)
+            </button>
+        </nav>
+
+        <!-- TAB 0: Config -->
+        <section id="tab-config" class="tab-content active transition-opacity duration-300">
+            <div class="bg-white p-6 rounded-lg shadow-sm mb-6">
+                <h2 class="text-lg font-bold mb-4 border-b pb-2">기본정보 입력</h2>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">Gemini API Key</label>
+                        <input type="password" id="gemini-key" oninput="saveConfig()"
+                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-3 border"
+                            placeholder="AIzaSy...">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">DART API Key</label>
+                        <input type="password" id="dart-key" oninput="saveConfig()"
+                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-3 border"
+                            placeholder="DART API 키를 입력하세요">
+                    </div>
+                </div>
+
+                <div class="border-t pt-6 mt-6">
+                    <h3 class="text-md font-bold mb-3 text-gray-800">재무제표 최신화</h3>
+                    <p class="text-sm text-gray-500 mb-4">현재 저장된 (D-1y_data.csv 등) 데이터의 최신화 여부를 검증하고, 오래된 경우 DART API를
+                        통해 5년치(D-1y ~ D-5y) 재무제표를 갱신합니다.</p>
+                    <button onclick="updateFinancials()" id="btn-update-fin"
+                        class="px-6 py-2 bg-green-600 hover:bg-green-700 text-white font-bold rounded-md shadow-sm transition-colors text-sm">
+                        🔄 최신화 확인 및 크롤링 시작
+                    </button>
+
+                    <!-- Update Financials Progress -->
+                    <div id="fin-progress-container"
+                        class="hidden mt-6 bg-gray-50 rounded-lg p-4 border border-gray-100">
+                        <div class="flex justify-between items-center mb-2">
+                            <span class="text-sm font-medium text-gray-700" id="fin-progress-text">초기화 중...</span>
+                            <span class="text-sm font-medium text-gray-700" id="fin-progress-pct">0%</span>
+                        </div>
+                        <div class="w-full bg-gray-200 rounded-full h-2.5 mb-2">
+                            <div id="fin-progress-bar"
+                                class="bg-green-600 h-2.5 rounded-full transition-all duration-300" style="width: 0%">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 1: Fast Backtest -->
+        <section id="tab-fast" class="tab-content transition-opacity duration-300">
+            <div class="bg-white p-6 rounded-lg shadow-sm mb-6">
+                <h2 class="text-lg font-bold mb-4 border-b pb-2">빠른 백테스팅 (AI 자연어 분석)</h2>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">백테스트 조건 자연어 입력</label>
+                    <textarea id="fast-query" rows="5"
+                        class="w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 p-3 border"
+                        placeholder="예: 기간은 3년. ROE 10 이상인 종목 중에서, 5일선이 20일선을 돌파할 때 사서 이전보다 수익률이 10% 이상이면 팔아줘. 예측은 안함."></textarea>
+                </div>
+
+                <div class="text-center mt-4">
+                    <button onclick="runFastBacktest()" id="btn-run-fast"
+                        class="px-8 py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-md shadow-sm transition-colors">
+                        ✨ 바로 백테스팅 시작
+                    </button>
+                </div>
+
+                <!-- Fast Backtest Log Window -->
+                <div id="fast-logs" class="hidden mt-6 bg-gray-50 p-4 rounded-md border border-gray-200">
+                    <h3 class="font-bold text-sm text-gray-700 mb-2">AI 해석 조건</h3>
+                    <ul id="fast-conditions" class="text-sm text-gray-600 space-y-1 list-disc pl-5">
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 1: Filter -->
+        <section id="tab-filter" class="tab-content transition-opacity duration-300">
+            <div class="bg-white p-6 rounded-lg shadow-sm mb-6">
+                <h2 class="text-lg font-bold mb-4 border-b pb-2">재무 지표 기반 종목 필터링</h2>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-700 mb-2">조건 검색식(AI 변환 / 직접 입력 모두 가능)</label>
+                    <div class="flex flex-col md:flex-row gap-2">
+                        <input type="text" id="filter-query"
+                            class="flex-1 rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-3 border"
+                            placeholder="예: PER 10 이하이고 ROE 10 이상인 종목 찾아줘 (또는 PER<10 AND ROE>=10 직접 입력)">
+                        <button onclick="generateWithAI('filter', 'filter-query')"
+                            class="bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-3 px-4 rounded-md transition-colors shadow-sm flex items-center justify-center gap-1 border border-indigo-200">
+                            ✨ AI로 생성
+                        </button>
+                        <button onclick="runFilter()"
+                            class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-md transition-colors shadow-sm">
+                            필터링 실행
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Filter Loading State -->
+                <div id="filter-loading" class="hidden py-8 text-center text-gray-500">
+                    <div
+                        class="inline-block w-8 h-8 border-4 border-gray-200 border-t-blue-500 rounded-full animate-spin mb-2">
+                    </div>
+                    <p>필터링 진행 중...</p>
+                </div>
+
+                <!-- Filter Results -->
+                <div id="filter-results-container" class="hidden">
+                    <div class="flex justify-between items-center mb-3 mt-6">
+                        <h3 class="font-medium text-green-700">검색 결과: <span id="filter-count" class="font-bold">0</span>
+                            종목</h3>
+                        <button onclick="goToBacktest()"
+                            class="text-sm bg-green-100 text-green-700 hover:bg-green-200 px-4 py-2 rounded font-medium transition-colors">선택
+                            종목으로 백테스트 가기 →</button>
+                    </div>
+                    <div class="overflow-x-auto shadow ring-1 ring-black ring-opacity-5 md:rounded-lg">
+                        <table class="min-w-full divide-y divide-gray-300 bg-white">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th
+                                        class="py-3 px-4 w-12 text-center text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                        <input type="checkbox" id="selectAllCheckbox" onclick="toggleSelectAll()"
+                                            class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer"
+                                            checked>
+                                    </th>
+                                    <th
+                                        class="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                        종목코드</th>
+                                    <th
+                                        class="py-3 px-4 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                                        기업명</th>
+                                </tr>
+                            </thead>
+                            <tbody id="filter-table-body" class="divide-y divide-gray-200 bg-white">
+                                <!-- Rows inserted here -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 2: Backtest Setup -->
+        <section id="tab-backtest" class="tab-content transition-opacity duration-300">
+            <div class="bg-white p-6 rounded-lg shadow-sm mb-6">
+                <h2 class="text-lg font-bold mb-4 border-b pb-2">전략 설정 (매수/매도 로직)</h2>
+                <div class="grid grid-cols-1 gap-6 mb-6">
+                    <div>
+                        <div class="flex justify-between items-center mb-2">
+                            <label class="block text-sm font-medium text-red-600">매수 로직 (Buy Logic)</label>
+                            <button onclick="generateWithAI('buy', 'buy-logic')"
+                                class="text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-3 rounded-full transition-colors flex items-center gap-1 border border-indigo-200">✨
+                                AI 변환</button>
+                        </div>
+                        <textarea id="buy-logic" rows="2"
+                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-red-500 focus:ring-red-500 p-3 border font-mono text-sm"
+                            placeholder="예: 5일선이 20일선을 돌파하고 RSI가 30 이하일 때 매수해줘"></textarea>
+                    </div>
+                    <div>
+                        <div class="flex justify-between items-center mb-2">
+                            <label class="block text-sm font-medium text-blue-600">매도 로직 (Sell Logic)</label>
+                            <button onclick="generateWithAI('sell', 'sell-logic')"
+                                class="text-xs bg-indigo-100 hover:bg-indigo-200 text-indigo-700 font-medium py-1 px-3 rounded-full transition-colors flex items-center gap-1 border border-indigo-200">✨
+                                AI 변환</button>
+                        </div>
+                        <textarea id="sell-logic" rows="2"
+                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-3 border font-mono text-sm"
+                            placeholder="예: 5일선이 20일선을 데드크로스 하거나 이전보다 수익률이 10% 이상이면 팔아줘"></textarea>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6 pb-6 border-b border-gray-100">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">백테스팅 기간</label>
+                        <select id="period-months"
+                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-3 border bg-gray-50">
+                            <option value="3">3개월</option>
+                            <option value="6">6개월</option>
+                            <option value="12" selected>1년</option>
+                            <option value="36">3년</option>
+                            <option value="60">5년</option>
+                            <option value="120">10년</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">몬테카를로 미래 예측 시뮬레이션</label>
+                        <select id="mc-period"
+                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-3 border bg-gray-50">
+                            <option value="안함" selected>사용 안 함</option>
+                            <option value="1개월">향후 1개월</option>
+                            <option value="3개월">향후 3개월</option>
+                            <option value="6개월">향후 6개월</option>
+                            <option value="1년">향후 1년</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6 pb-6 border-b border-gray-100 mt-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">포트폴리오 배분 전략</label>
+                        <select id="portfolio-strategy"
+                            class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 p-3 border bg-gray-50">
+                            <option value="equal_weight" selected>균등 배분 (Equal Weight)</option>
+                            <option value="inverse_volatility">역변동성 배분 (Inverse Volatility)</option>
+                            <option value="kelly_criterion">켈리 베팅 (Kelly Criterion)</option>
+                            <option value="risk_parity">리스크 패리티 (Risk Parity)</option>
+                            <option value="momentum_weight">모멘텀 비례 배분</option>
+                            <option value="min_variance">최소 분산 (Minimum Variance)</option>
+                            <option value="max_sharpe">최대 샤프 (Maximum Sharpe)</option>
+                            <option value="market_cap">시가총액 가중 (Market Cap)</option>
+                            <option value="dynamic_asset">동적 자산 배분 (Dynamic Asset Allocation)</option>
+                            <option value="all_in">전액 몰빵 (All-in)</option>
+                        </select>
+                    </div>
+                    <div class="flex items-center mt-6">
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input type="checkbox" id="use-tax-fee"
+                                class="w-5 h-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                            <span class="text-sm font-medium text-gray-700">거래 비용 반영 및 세금 정확도 개선</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="text-center mt-6">
+                    <button onclick="runBacktest()"
+                        class="w-full md:w-auto px-10 py-4 bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg shadow-md transition-all transform hover:scale-105">
+                        시뮬레이션 시작 (Run Backtest)
+                    </button>
+                </div>
+
+                <!-- Progress / Loading -->
+                <div id="bt-loading" class="hidden mt-8 bg-gray-50 rounded-lg p-6 border border-gray-100">
+                    <div class="flex flex-col items-center justify-center text-center mb-4">
+                        <div
+                            class="inline-block w-10 h-10 border-4 border-gray-200 border-t-red-500 rounded-full animate-spin mb-3">
+                        </div>
+                        <h3 class="text-lg font-medium text-gray-800">전략 평가 및 시뮬레이션 중...</h3>
+                    </div>
+
+                    <div class="w-full bg-gray-200 rounded-full h-2.5 mb-4">
+                        <div id="bt-progress-bar" class="bg-red-600 h-2.5 rounded-full transition-all duration-300"
+                            style="width: 0%"></div>
+                    </div>
+
+                    <div id="bt-logs"
+                        class="bg-black text-green-400 font-mono text-sm p-3 rounded h-40 overflow-y-auto whitespace-pre-wrap flex flex-col gap-1">
+                        <!-- Logs appended here -->
+                    </div>
+                </div>
+
+                <!-- Error Modal -->
+                <div id="bt-error-modal" class="hidden mt-8 bg-red-50 rounded-lg p-6 border border-red-200">
+                    <h3 class="text-lg font-bold text-red-700 mb-2">백테스트 오류 발생</h3>
+                    <p id="bt-error-text" class="text-sm text-red-600 whitespace-pre-wrap"></p>
+                </div>
+            </div>
+        </section>
+
+        <!-- TAB 3: Results -->
+        <section id="tab-results" class="tab-content transition-opacity duration-300">
+
+            <!-- Dashboard Stats -->
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+                <div class="bg-white rounded-lg p-4 shadow-sm border-t-4 border-emerald-500 text-center">
+                    <p class="text-xs text-gray-500 font-medium uppercase">Total Return</p>
+                    <p id="res-return" class="text-xl font-bold text-gray-900 mt-1">-</p>
+                </div>
+                <div class="bg-white rounded-lg p-4 shadow-sm border-t-4 border-emerald-400 text-center">
+                    <p class="text-xs text-gray-500 font-medium uppercase">CAGR</p>
+                    <p id="res-cagr" class="text-xl font-bold text-gray-900 mt-1">-</p>
+                </div>
+                <div class="bg-white rounded-lg p-4 shadow-sm border-t-4 border-red-400 text-center">
+                    <p class="text-xs text-gray-500 font-medium uppercase">MDD / 최대 낙폭</p>
+                    <p id="res-mdd" class="text-xl font-bold text-gray-900 mt-1">-</p>
+                </div>
+                <div class="bg-white rounded-lg p-4 shadow-sm border-t-4 border-blue-400 text-center">
+                    <p class="text-xs text-gray-500 font-medium uppercase">Sharpe Ratio</p>
+                    <p id="res-sharpe" class="text-xl font-bold text-gray-900 mt-1">-</p>
+                </div>
+                <div class="bg-white rounded-lg p-4 shadow-sm border-t-4 border-purple-400 text-center">
+                    <p class="text-xs text-gray-500 font-medium uppercase">승률 (Win Rate)</p>
+                    <p id="res-winrate" class="text-sm font-bold text-gray-900 mt-1">-</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <!-- Main Chart -->
+                <div class="lg:col-span-2 bg-white p-6 rounded-lg shadow-sm">
+                    <h3 class="font-bold text-gray-800 mb-4 border-b pb-2">수익률 추이 (Cumulative Return)</h3>
+                    <div class="relative h-80 w-full">
+                        <canvas id="returnChart"></canvas>
+                    </div>
+                </div>
+
+                <div class="flex flex-col gap-6">
+                    <!-- Recent Buy Signals -->
+                    <div class="bg-white p-4 rounded-lg shadow-sm flex-1">
+                        <h3 class="font-bold text-red-600 mb-3 text-sm border-b pb-1">최근 매수 신호 포착</h3>
+                        <div id="buy-signals-list"
+                            class="text-sm text-gray-600 max-h-40 overflow-y-auto pr-2 space-y-2">
+                            <p class="text-gray-400 italic text-center py-4">신호 없음</p>
+                        </div>
+                    </div>
+                    <!-- Recent Sell Signals -->
+                    <div class="bg-white p-4 rounded-lg shadow-sm flex-1">
+                        <h3 class="font-bold text-blue-600 mb-3 text-sm border-b pb-1">최근 매도 신호 포착</h3>
+                        <div id="sell-signals-list"
+                            class="text-sm text-gray-600 max-h-40 overflow-y-auto pr-2 space-y-2">
+                            <p class="text-gray-400 italic text-center py-4">신호 없음</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI Report Section -->
+            <div class="lg:col-span-3 bg-indigo-50 border border-indigo-100 p-6 rounded-lg shadow-sm mt-6 mb-6">
+                <h3 class="font-bold text-indigo-800 mb-3 flex items-center gap-2 border-b border-indigo-200 pb-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M13 10V3L4 14h7v7l9-11h-7z">
+                        </path>
+                    </svg>
+                    AI 투자 요약 보고서
+                </h3>
+                <p id="res-ai-report" class="text-sm text-gray-700 leading-relaxed">백테스트를 실행하면 AI가
+                    분석한 요약 보고서가 생성됩니다.</p>
+            </div>
+
+        </section>
+
+        <!-- TAB 4: Memories -->
+        <section id="tab-memories" class="tab-content transition-opacity duration-300">
+            <div class="bg-white p-6 rounded-lg shadow-sm mb-6">
+                <div
+                    class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 border-b pb-2 gap-4">
+                    <h2 class="text-lg font-bold flex items-center gap-2">
+                        <svg class="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10">
+                            </path>
+                        </svg>
+                        Memories 보관함
+                    </h2>
+                    <div class="flex flex-wrap items-center gap-2">
+                        <label class="flex items-center gap-1 text-sm text-gray-700 mr-2 cursor-pointer">
+                            <input type="checkbox" id="memoriesSelectAll" onclick="toggleMemoriesSelectAll()"
+                                class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-4 h-4">
+                            전체 선택
+                        </label>
+                        <button onclick="deleteSelectedMemories()"
+                            class="text-sm bg-red-50 text-red-600 hover:bg-red-100 px-3 py-1.5 rounded transition-colors border border-red-200">
+                            선택 삭제
+                        </button>
+                        <button onclick="deleteAllMemories()"
+                            class="text-sm bg-red-600 text-white hover:bg-red-700 px-3 py-1.5 rounded transition-colors">
+                            전체 삭제
+                        </button>
+                        <button onclick="fetchMemories()"
+                            class="text-sm text-blue-600 hover:text-blue-800 hover:underline flex items-center gap-1 ml-2">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+                                </path>
+                            </svg>
+                            새로고침
+                        </button>
+                    </div>
+                </div>
+
+                <p class="text-sm text-gray-500 mb-6">백테스트 결과 엑셀 파일, 텍스트 보고서 등이 위치한 폴더입니다. 필요 없는 파일은 선택하여 삭제할 수 있습니다.
+                </p>
+
+                <div id="memories-loading" class="hidden py-10 text-center text-gray-500">
+                    <div
+                        class="inline-block w-8 h-8 border-4 border-gray-200 border-t-gray-500 rounded-full animate-spin mb-2">
+                    </div>
+                    <p>파일 목록을 불러오는 중...</p>
+                </div>
+
+                <div id="memories-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <!-- Dynamically populated files -->
+                </div>
+            </div>
+        </section>
+
+    </div>
+
+    <script>
+        // Global context state
+        let globalTargetCompanies = [];
+        let chartInstance = null;
+
+        // Configuration
+        function saveConfig() {
+            localStorage.setItem('geminiKey', document.getElementById('gemini-key').value);
+            localStorage.setItem('dartKey', document.getElementById('dart-key').value);
+        }
+
+        window.onload = function () {
+            const gk = localStorage.getItem('geminiKey');
+            const dk = localStorage.getItem('dartKey');
+            if (gk) document.getElementById('gemini-key').value = gk;
+            if (dk) document.getElementById('dart-key').value = dk;
+        }
+
+        function getKeys() {
+            const gk = document.getElementById('gemini-key').value.trim();
+            const dk = document.getElementById('dart-key').value.trim();
+            if (!gk || !dk) {
+                alert('0. 기본정보 입력 탭에서 Gemini API Key와 DART API Key를 모두 입력해야 실행할 수 있습니다.');
+                switchTab('config');
+                return null;
+            }
+            return { gemini: gk, dart: dk };
+        }
+
+        async function updateFinancials() {
+            const keys = getKeys();
+            if (!keys) return;
+
+            const btn = document.getElementById('btn-update-fin');
+            const container = document.getElementById('fin-progress-container');
+            const pBar = document.getElementById('fin-progress-bar');
+            const pText = document.getElementById('fin-progress-text');
+            const pPct = document.getElementById('fin-progress-pct');
+
+            btn.disabled = true;
+            container.classList.remove('hidden');
+            pBar.style.width = '0%';
+            pText.innerText = '검증 시작 중...';
+            pPct.innerText = '0%';
+
+            try {
+                const res = await fetch('/update_financials', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dart_api_key: keys.dart })
+                });
+
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.message || '서버 오류');
+                }
+                const data = await res.json();
+
+                if (data.status === 'uptodate') {
+                    pBar.style.width = '100%';
+                    pText.innerText = '최신 재무제표입니다.';
+                    pPct.innerText = '100%';
+                    alert('최신 재무제표입니다.');
+                } else if (data.status === 'updating') {
+                    // Poll progress
+                    const pInterval = setInterval(async () => {
+                        try {
+                            const progRes = await fetch('/update_financials/progress');
+                            const pd = await progRes.json();
+                            pBar.style.width = Math.min(100, pd.progress) + '%';
+                            pPct.innerText = Math.round(pd.progress) + '%';
+                            if (pd.logs && pd.logs.length > 0) {
+                                pText.innerText = pd.logs[pd.logs.length - 1];
+                            }
+                            if (pd.status === 'done' || pd.status === 'error') {
+                                clearInterval(pInterval);
+                                btn.disabled = false;
+                                if (pd.status === 'error') {
+                                    alert('오류 발생: ' + pd.error);
+                                } else {
+                                    alert('재무제표 업데이트가 완료되었습니다.');
+                                }
+                            }
+                        } catch (e) { }
+                    }, 1000);
+                    return; // exit to not re-enable immediately
+                }
+            } catch (e) {
+                alert('재무제표 확인/업데이트 실패: ' + e.message);
+                pText.innerText = '오류 발생';
+            }
+            btn.disabled = false;
+        }
+
+        // Core Navigation
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+
+            document.getElementById(`tab-${tabId}`).classList.add('active');
+            document.getElementById(`btn-${tabId}`).classList.add('active');
+
+            if (tabId === 'memories') {
+                fetchMemories();
+            }
+        }
+
+        function goToBacktest() {
+            if (globalTargetCompanies.length === 0) {
+                alert('필터링된 종목이 없습니다.');
+                return;
+            }
+            const selectedCount = document.querySelectorAll('.stock-checkbox:checked').length;
+            if (selectedCount === 0) {
+                alert('필터링된 종목 중 하나 이상을 선택해주세요.');
+                return;
+            }
+            switchTab('backtest');
+        }
+
+        // 0. AI Generate Logic (Streaming Support)
+        async function generateWithAI(type, inputId) {
+            const keys = getKeys();
+            if (!keys) return;
+
+            const inputElement = document.getElementById(inputId);
+            const promptText = inputElement.value.trim();
+
+            if (!promptText) {
+                alert('자연어로 조건을 먼저 입력해주세요.');
+                return;
+            }
+
+            const originalText = inputElement.value;
+            inputElement.value = '';
+            inputElement.disabled = true;
+            inputElement.placeholder = 'AI 추론 중...';
+
+            try {
+                const response = await fetch('/generate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ prompt: promptText, type: type, gemini_key: keys.gemini })
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.message || '서버 응답 오류');
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    const chunk = decoder.decode(value, { stream: true });
+                    inputElement.value += chunk;
+                }
+
+                // Final cleanup
+                inputElement.value = inputElement.value.replace(/`/g, "").replace(/^json\n?/i, "").trim();
+
+            } catch (e) {
+                alert('서버 또는 API 연동 에러: ' + e.message);
+                inputElement.value = originalText;
+            } finally {
+                inputElement.disabled = false;
+                inputElement.placeholder = '';
+            }
+        }
+
+        // 0-0. Fast Backtesting
+        async function runFastBacktest() {
+            const keys = getKeys();
+            if (!keys) return;
+
+            const text = document.getElementById('fast-query').value.trim();
+            if (!text) {
+                alert('자연어로 조건을 입력해주세요.');
+                return;
+            }
+
+            const btn = document.getElementById('btn-run-fast');
+            const originalBtnText = btn.innerHTML;
+            btn.innerHTML = 'AI 문맥 분석 중...';
+            btn.disabled = true;
+
+            const logWindow = document.getElementById('fast-logs');
+            const condList = document.getElementById('fast-conditions');
+            logWindow.classList.add('hidden');
+
+            try {
+                const parseRes = await fetch('/fast_backtest_parse', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text, gemini_key: keys.gemini })
+                });
+                const parseData = await parseRes.json();
+
+                if (parseData.status !== 'success') {
+                    alert(parseData.message);
+                    btn.innerHTML = originalBtnText;
+                    btn.disabled = false;
+                    return;
+                }
+
+                const conditions = parseData.data;
+
+                // Validate conditions
+                if (conditions.buy_logic === 'error' || !conditions.buy_logic) {
+                    alert('에러: 매수 로직을 파악할 수 없습니다. 매수 조건을 반드시 입력해주세요.');
+                    btn.innerHTML = originalBtnText;
+                    btn.disabled = false;
+                    return;
+                }
+
+                const fin = conditions.financial_logic || '전체';
+                const buy = conditions.buy_logic;
+                const sell = (conditions.sell_logic && conditions.sell_logic !== 'error') ? conditions.sell_logic : 'Buy&Hold';
+                const period = conditions.period_months || 36;
+                const mc = conditions.mc_period || '안함';
+
+                condList.innerHTML = `
+                    <li><strong>재무 로직:</strong> ${fin}</li>
+                    <li><strong>매수 로직:</strong> ${buy}</li>
+                    <li><strong>매도 로직:</strong> ${sell}</li>
+                    <li><strong>백테스팅 기간:</strong> ${period}개월</li>
+                    <li><strong>예측 기간:</strong> ${mc}</li>
+                `;
+                logWindow.classList.remove('hidden');
+
+                btn.innerHTML = '재무 조건 필터링 중...';
+
+                const filterRes = await fetch('/filter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: fin })
+                });
+                const filterData = await filterRes.json();
+
+                if (filterData.error) {
+                    alert("필터 처리 중 에러가 발생했습니다: \n" + filterData.error);
+                    btn.innerHTML = originalBtnText;
+                    btn.disabled = false;
+                    return;
+                }
+                globalTargetCompanies = filterData.filtered_companies;
+
+                if (globalTargetCompanies.length === 0) {
+                    alert('필터링된 종목이 없습니다.');
+                    btn.innerHTML = originalBtnText;
+                    btn.disabled = false;
+                    return;
+                }
+
+                // Set UI values
+                document.getElementById('buy-logic').value = buy;
+                document.getElementById('sell-logic').value = sell;
+
+                const periodSelect = document.getElementById('period-months');
+                let foundPeriod = false;
+                for (let i = 0; i < periodSelect.options.length; i++) {
+                    if (periodSelect.options[i].value == period) {
+                        periodSelect.selectedIndex = i;
+                        foundPeriod = true;
+                        break;
+                    }
+                }
+                if (!foundPeriod) {
+                    // if exact period isn't in options, just set nearest or default to 36
+                    periodSelect.value = "36";
+                }
+
+                const mcSelect = document.getElementById('mc-period');
+                let foundMc = false;
+                for (let i = 0; i < mcSelect.options.length; i++) {
+                    if (mcSelect.options[i].value === mc) {
+                        mcSelect.selectedIndex = i;
+                        foundMc = true;
+                        break;
+                    }
+                }
+                if (!foundMc) {
+                    mcSelect.value = "안함";
+                }
+
+                document.getElementById('filter-query').value = fin;
+                renderFilterTable(globalTargetCompanies);
+
+                switchTab('backtest');
+                runBacktest();
+
+            } catch (e) {
+                alert('서버 에러: ' + e);
+            } finally {
+                btn.innerHTML = originalBtnText;
+                btn.disabled = false;
+            }
+        }
+
+        // 1. Filtering Logic
+        async function runFilter() {
+            const query = document.getElementById('filter-query').value;
+            const bContainer = document.getElementById('filter-results-container');
+            const bLoader = document.getElementById('filter-loading');
+
+            bContainer.classList.add('hidden');
+            bLoader.classList.remove('hidden');
+
+            try {
+                const response = await fetch('/filter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: query })
+                });
+                const data = await response.json();
+
+                if (data.error) {
+                    alert("필터 처리 중 에러가 발생했습니다: \n" + data.error);
+                    return;
+                }
+
+                globalTargetCompanies = data.filtered_companies;
+                renderFilterTable(globalTargetCompanies);
+
+                bLoader.classList.add('hidden');
+                bContainer.classList.remove('hidden');
+            } catch (e) {
+                alert('서버 연결 오류: ' + e.message);
+                bLoader.classList.add('hidden');
+            }
+        }
+
+        function renderFilterTable(companies) {
+            document.getElementById('filter-count').innerText = companies.length;
+            const tbody = document.getElementById('filter-table-body');
+            tbody.innerHTML = '';
+
+            companies.forEach((comp, idx) => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                <td class="py-3 px-4 text-center">
+                    <input type="checkbox" class="stock-checkbox rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer" value="${idx}" checked>
+                </td>
+                <td class="py-3 px-4 whitespace-nowrap text-sm font-medium text-gray-900">${comp['종목코드']}</td>
+                <td class="py-3 px-4 whitespace-nowrap text-sm text-gray-500">${comp['기업명']}</td>
+            `;
+                tbody.appendChild(tr);
+            });
+            document.getElementById('selectAllCheckbox').checked = true;
+        }
+
+        function toggleSelectAll() {
+            const selectAll = document.getElementById('selectAllCheckbox').checked;
+            const checkboxes = document.querySelectorAll('.stock-checkbox');
+            checkboxes.forEach(cb => cb.checked = selectAll);
+        }
+
+        // 2. Backtesting Logic
+        async function runBacktest() {
+            if (globalTargetCompanies.length === 0) {
+                alert('먼저 재무 필터링 탭에서 종목을 필터링해주세요.');
+                switchTab('filter');
+                return;
+            }
+
+            const selectedIndexes = Array.from(document.querySelectorAll('.stock-checkbox:checked')).map(cb => parseInt(cb.value));
+            if (selectedIndexes.length === 0) {
+                alert('선택된 종목이 없습니다. 재무 필터링 탭에서 종목을 선택해주세요.');
+                switchTab('filter');
+                return;
+            }
+            const selectedCompanies = selectedIndexes.map(idx => globalTargetCompanies[idx]);
+
+            const query = document.getElementById('filter-query').value.trim();
+            const buyLogic = document.getElementById('buy-logic').value.trim();
+            const sellLogic = document.getElementById('sell-logic').value.trim();
+            const period = parseInt(document.getElementById('period-months').value);
+            const mcPeriod = document.getElementById('mc-period').value;
+            const portfolioStrategy = document.getElementById('portfolio-strategy').value;
+            const useTaxFee = document.getElementById('use-tax-fee').checked;
+
+            const keys = getKeys();
+            if (!keys) return;
+
+            if (!buyLogic || !sellLogic) {
+                alert('매수/매도 로직을 입력해주세요.');
+                return;
+            }
+
+            document.getElementById('bt-loading').classList.remove('hidden');
+            document.getElementById('bt-error-modal').classList.add('hidden');
+            document.getElementById('bt-progress-bar').style.width = '0%';
+            document.getElementById('bt-logs').innerHTML = '';
+
+            const progressInterval = setInterval(async () => {
+                try {
+                    const res = await fetch('/progress');
+                    const pd = await res.json();
+                    if (pd.progress > 0) {
+                        document.getElementById('bt-progress-bar').style.width = pd.progress + '%';
+                    }
+                    if (pd.logs && pd.logs.length > 0) {
+                        const logsHtml = pd.logs.map(l => `<div>${l}</div>`).join('');
+                        const logsContainer = document.getElementById('bt-logs');
+                        logsContainer.innerHTML = logsHtml;
+                        logsContainer.scrollTop = logsContainer.scrollHeight;
+                    }
+                } catch (e) { }
+            }, 500);
+
+            try {
+                const response = await fetch('/backtest', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        target_companies: selectedCompanies,
+                        query: query,
+                        buy_logic: buyLogic,
+                        sell_logic: sellLogic,
+                        period_months: period,
+                        mc_period_str: mcPeriod,
+                        portfolio_strategy: portfolioStrategy,
+                        use_tax_fee: useTaxFee,
+                        gemini_key: keys.gemini,
+                        dart_key: keys.dart
+                    })
+                });
+
+                const result = await response.json();
+                clearInterval(progressInterval);
+                document.getElementById('bt-loading').classList.add('hidden');
+
+                if (result.status === "error") {
+                    document.getElementById('bt-error-modal').classList.remove('hidden');
+                    document.getElementById('bt-error-text').innerText = result.message;
+                    return;
+                }
+
+                // Populate Results UI
+                populateResults(result.data);
+                switchTab('results');
+
+            } catch (e) {
+                clearInterval(progressInterval);
+                document.getElementById('bt-loading').classList.add('hidden');
+                document.getElementById('bt-error-modal').classList.remove('hidden');
+                document.getElementById('bt-error-text').innerText = '타임아웃 또는 서버 처리 오류 발생: ' + e;
+            }
+        }
+
+        // 3. Render Results
+        function populateResults(data) {
+            // Statistics
+            const stats = data.detailed_stats;
+            document.getElementById('res-return').innerText = stats['Total Return'] || '-';
+            document.getElementById('res-cagr').innerText = stats['CAGR'] || '-';
+            document.getElementById('res-mdd').innerText = stats['MDD'] || '-';
+            document.getElementById('res-sharpe').innerText = stats['Sharpe'] || '-';
+            document.getElementById('res-winrate').innerText = stats['Win Rate'] || '-';
+
+            // Draw Chart
+            renderChart(data.returns_data, data.mc_results);
+
+            // Populate AI Report
+            const reportContainer = document.getElementById('res-ai-report');
+            if (data.ai_report) {
+                reportContainer.classList.add('whitespace-pre-wrap');
+                reportContainer.innerText = data.ai_report;
+            } else {
+                reportContainer.classList.remove('whitespace-pre-wrap');
+                reportContainer.innerText = "보고서 정보가 없습니다.";
+            }
+
+            // Render Signals
+            const buyContainer = document.getElementById('buy-signals-list');
+            const sellContainer = document.getElementById('sell-signals-list');
+
+            buyContainer.innerHTML = '';
+            if (data.recent_signals.buy.length > 0) {
+                data.recent_signals.buy.forEach(s => {
+                    buyContainer.innerHTML += `<div class="flex justify-between border-b border-gray-100 pb-1">
+                    <span><span class="font-medium text-gray-800">${s.name}</span> <span class="text-xs text-gray-400">(${s.code})</span></span>
+                    <span class="text-right">
+                        <span class="block">${s.price.toLocaleString()} 원</span>
+                        <span class="block text-xs text-red-500">${s.date}</span>
+                    </span>
+                </div>`;
+                });
+            } else {
+                buyContainer.innerHTML = '<p class="text-gray-400 italic text-center py-4">최근 5일간 매수 신호 없음</p>';
+            }
+
+            sellContainer.innerHTML = '';
+            if (data.recent_signals.sell.length > 0) {
+                data.recent_signals.sell.forEach(s => {
+                    sellContainer.innerHTML += `<div class="flex justify-between border-b border-gray-100 pb-1">
+                    <span><span class="font-medium text-gray-800">${s.name}</span> <span class="text-xs text-gray-400">(${s.code})</span></span>
+                    <span class="text-right">
+                        <span class="block">${s.price.toLocaleString()} 원</span>
+                        <span class="block text-xs text-blue-500">${s.date}</span>
+                    </span>
+                </div>`;
+                });
+            } else {
+                sellContainer.innerHTML = '<p class="text-gray-400 italic text-center py-4">최근 5일간 매도 신호 없음</p>';
+            }
+        }
+
+        function renderChart(retData, mcData) {
+            const ctx = document.getElementById('returnChart').getContext('2d');
+            if (chartInstance) { chartInstance.destroy(); }
+
+            const labels = retData.map(d => d.Date.split(' ')[0]);
+            const stratValues = retData.map(d => d.Strategy);
+            const bnhValues = retData.map(d => d.BnH);
+            const kospiValues = retData.map(d => d.KOSPI || 0);
+
+            let datasets = [
+                {
+                    label: '내 전략 (Strategy)',
+                    data: stratValues,
+                    borderColor: '#dc2626',
+                    backgroundColor: 'rgba(220, 38, 38, 0.1)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.1,
+                    fill: true
+                },
+                {
+                    label: '기준 (Buy & Hold)',
+                    data: bnhValues,
+                    borderColor: '#2563eb',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    borderDash: [5, 5],
+                    tension: 0.1
+                },
+                {
+                    label: 'KOSPI 지수',
+                    data: kospiValues,
+                    borderColor: '#059669',
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    borderDash: [2, 2],
+                    tension: 0.1
+                }
+            ];
+
+            // Append Monte Carlo if exists
+            if (mcData && mcData.dates && mcData.dates.length > 0) {
+                const initialCapital = 100000000;
+                const mcLabels = mcData.dates;
+
+                const mcMedian = mcData.median.map(v => ((v - initialCapital) / initialCapital) * 100);
+                const mcUpper = mcData.upper.map(v => ((v - initialCapital) / initialCapital) * 100);
+                const mcLower = mcData.lower.map(v => ((v - initialCapital) / initialCapital) * 100);
+
+                // Extend labels array uniquely
+                const allLabels = [...labels];
+                mcLabels.forEach(d => { if (!allLabels.includes(d)) allLabels.push(d); });
+
+                // Create null arrays for offsets
+                const getPaddedData = (newData) => {
+                    let pDate = Array(labels.length - 1).fill(null);
+                    // Connect the last point natively
+                    pDate.push(stratValues[stratValues.length - 1]);
+                    return [...pDate, ...newData];
+                };
+
+                datasets.push({
+                    label: 'MC 예측 중앙값 (Forecast Median)',
+                    data: getPaddedData(mcMedian),
+                    borderColor: '#d97706',
+                    borderWidth: 2,
+                    borderDash: [3, 3],
+                    pointRadius: 0,
+                    tension: 0.1
+                });
+                // We can't do exact "fill_between" natively in basic ChartJS without plugins easily,
+                // so we draw Upper and Lower limits as thin lines.
+                datasets.push({
+                    label: '상단 95% (Forecast Upper)',
+                    data: getPaddedData(mcUpper),
+                    borderColor: 'rgba(252, 211, 77, 0.5)',
+                    backgroundColor: 'transparent',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    fill: '-1' // attempt to fill to median
+                });
+                datasets.push({
+                    label: '하단 5% (Forecast Lower)',
+                    data: getPaddedData(mcLower),
+                    borderColor: 'rgba(252, 211, 77, 0.5)',
+                    backgroundColor: 'transparent',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    fill: '-2' // attempt to fill to upper
+                });
+            }
+
+            chartInstance = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: mcData ? [...labels, ...(mcData.dates || [])] : labels,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)}%` }
+                        },
+                        legend: { position: 'bottom' }
+                    },
+                    scales: {
+                        y: {
+                            title: { display: true, text: "Return (%)" },
+                            grid: { color: "#f3f4f6" }
+                        },
+                        x: {
+                            grid: { display: false }
+                        }
+                    }
+                }
+            });
+        }
+
+        // 4. Fetch Memories (Saved Excel/Files)
+        async function fetchMemories() {
+            const listDiv = document.getElementById('memories-list');
+            const loader = document.getElementById('memories-loading');
+
+            listDiv.innerHTML = '';
+            loader.classList.remove('hidden');
+
+            try {
+                const response = await fetch('/memories');
+                const data = await response.json();
+
+                loader.classList.add('hidden');
+
+                if (data.error) {
+                    listDiv.innerHTML = `<p class="text-red-500 p-4 col-span-3">에러: ${data.error}</p>`;
+                    return;
+                }
+
+                if (data.files.length === 0) {
+                    listDiv.innerHTML = `<div class="bg-gray-50 border border-dashed border-gray-300 rounded-lg p-10 text-center col-span-3">
+                    <p class="text-gray-400 mb-2">저장된 파일이나 백테스트 결과가 없습니다.</p>
+                </div>`;
+                    return;
+                }
+
+                data.files.forEach(f => {
+                    let iconSvg = '';
+                    if (f.name.endsWith('.db') || f.name.endsWith('.sqlite')) {
+                        iconSvg = `<svg class="w-8 h-8 text-blue-500" fill="currentColor" viewBox="0 0 20 20"><path d="M3 12v3c0 1.657 3.134 3 7 3s7-1.343 7-3v-3c0 1.657-3.134 3-7 3s-7-1.343-7-3z" /><path d="M3 7v3c0 1.657 3.134 3 7 3s7-1.343 7-3V7c0 1.657-3.134 3-7 3S3 8.657 3 7z" /><path d="M17 5c0 1.657-3.134 3-7 3S3 6.657 3 5s3.134-3 7-3 7 1.343 7 3z" /></svg>`;
+                    } else if (f.name.endsWith('.xlsx') || f.name.endsWith('.csv')) {
+                        iconSvg = `<svg class="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>`;
+                    } else {
+                        iconSvg = `<svg class="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>`;
+                    }
+
+                    listDiv.innerHTML += `
+                    <div class="border border-gray-200 bg-gray-50 rounded-lg p-4 flex items-center hover:bg-gray-100 transition-colors shadow-sm">
+                        <div class="flex items-center h-full mr-3 pl-1">
+                            <input type="checkbox" value="${f.name}" class="memory-checkbox rounded border-gray-300 text-blue-600 focus:ring-blue-500 cursor-pointer w-4 h-4" onclick="event.stopPropagation()">
+                        </div>
+                        <div class="flex-1 flex items-center cursor-pointer overflow-hidden" onclick="downloadFile('${f.name}')">
+                            <div class="mr-4">${iconSvg}</div>
+                            <div class="flex-1 overflow-hidden">
+                                <h4 class="font-medium text-gray-800 truncate text-sm" title="${f.name}">${f.name}</h4>
+                                <p class="text-xs text-gray-400 mt-1">${f.size} • ${f.modified}</p>
+                            </div>
+                            <div class="text-blue-500 p-2 ml-2">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                });
+
+                // Uncheck select all when freshly rendered
+                document.getElementById('memoriesSelectAll').checked = false;
+            } catch (e) {
+                listDiv.innerHTML = `<p class="text-red-500 p-4 col-span-3">데이터 로딩 오류: ${e}</p>`;
+                loader.classList.add('hidden');
+            }
+        }
+
+        function downloadFile(filename) {
+            window.open('/download/' + encodeURIComponent(filename), '_blank');
+        }
+
+        function toggleMemoriesSelectAll() {
+            const selectAll = document.getElementById('memoriesSelectAll').checked;
+            const checkboxes = document.querySelectorAll('.memory-checkbox');
+            checkboxes.forEach(cb => cb.checked = selectAll);
+        }
+
+        async function deleteSelectedMemories() {
+            const checkboxes = document.querySelectorAll('.memory-checkbox:checked');
+            if (checkboxes.length === 0) {
+                alert('삭제할 파일을 선택해주세요.');
+                return;
+            }
+            if (!confirm(`선택한 ${checkboxes.length}개의 파일을 정말 삭제하시겠습니까?`)) {
+                return;
+            }
+            const filenames = Array.from(checkboxes).map(cb => cb.value);
+            await callDeleteApi({ filenames: filenames });
+        }
+
+        async function deleteAllMemories() {
+            if (!confirm('저장소에 있는 모든 파일을 정말 삭제하시겠습니까? (DB 제외)')) {
+                return;
+            }
+            await callDeleteApi({ delete_all: true });
+        }
+
+        async function callDeleteApi(payload) {
+            try {
+                const response = await fetch('/memories/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    fetchMemories();
+                } else {
+                    alert('삭제 중 오류 발생: ' + data.message);
+                }
+            } catch (e) {
+                alert('API 호출 오류: ' + e);
+            }
+        }
+    </script>
+
+</body>
+
+</html>
