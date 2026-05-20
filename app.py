@@ -1,17 +1,21 @@
 import os
-import time
-from flask import Flask, request, jsonify, render_template, send_from_directory, Response, stream_with_context
-from quant_logic import QuantLogic
-from flask_cors import CORS
-import pandas as pd
-from datetime import datetime
-from google import genai
-import threading
-import pytz
-import json
-import re
 import io
+import re
+import json
+import time
 import base64
+import socket
+import threading
+from datetime import datetime
+
+import pytz
+import pandas as pd
+from flask import Flask, request, jsonify, render_template, send_from_directory, Response, stream_with_context
+from flask_cors import CORS
+from google import genai
+from google.genai import types
+
+from quant_logic import QuantLogic
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')
@@ -19,23 +23,46 @@ matplotlib.use('Agg')
 app = Flask(__name__)
 CORS(app)
 
-# Global progress state
-progress_state = {"status": "idle", "progress": 0, "logs": [], "error": None}
+# 진행률 공유 상태 — 백테스트/재무업데이트 양쪽에서 쓰던 복붙 3종 세트
+# (state dict + update_* + get_*)를 스레드세이프 클래스 하나로 통합.
+class ProgressTracker:
+    def __init__(self, error_sets_status=False):
+        self._error_sets_status = error_sets_status
+        self._lock = threading.Lock()
+        self._state = {"status": "idle", "progress": 0, "logs": [], "error": None}
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._state)
+
+    def reset(self, status):
+        with self._lock:
+            self._state = {"status": status, "progress": 0, "logs": [], "error": None}
+
+    def set_status(self, status):
+        with self._lock:
+            self._state["status"] = status
+
+    def update(self, pct, msg, error_enc=None):
+        with self._lock:
+            if error_enc:
+                self._state["error"] = error_enc
+                if self._error_sets_status:
+                    self._state["status"] = "error"
+            if pct is not None:
+                self._state["progress"] = pct
+            if msg:
+                now_str = datetime.now().strftime('%H:%M:%S')
+                self._state["logs"].append(f"[{now_str}] {msg}")
+
+
+progress_tracker = ProgressTracker()
+update_progress = progress_tracker.update
+
 
 @app.route('/progress', methods=['GET'])
 def get_progress():
-    global progress_state
-    return jsonify(progress_state)
-
-def update_progress(pct, msg, error_enc=None):
-    global progress_state
-    if error_enc:
-        progress_state["error"] = error_enc
-    if pct is not None:
-        progress_state["progress"] = pct
-    if msg:
-        now_str = datetime.now().strftime('%H:%M:%S')
-        progress_state["logs"].append(f"[{now_str}] {msg}")
+    return jsonify(progress_tracker.snapshot())
 
 logic_mgr = QuantLogic()
 def save_results_to_html(result, query, buy_logic, sell_logic):
@@ -91,97 +118,13 @@ def save_results_to_html(result, query, buy_logic, sell_logic):
             print("그래프 이미지 생성 실패:", ge)
             graph_base64 = None
 
-        html_content = f"""
-        <!DOCTYPE html>
-        <html lang="ko">
-        <head>
-            <meta charset="UTF-8">
-            <title>백테스트 결과 보고서</title>
-            <style>
-                body {{ font-family: 'Malgun Gothic', sans-serif; line-height: 1.6; color: #333; max-width: 1000px; margin: 0 auto; padding: 20px; background-color: #f4f7f6; }}
-                .container {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }}
-                h1 {{ color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }}
-                .tabs {{ display: flex; border-bottom: 2px solid #ddd; margin-bottom: 20px; }}
-                .tab-btn {{ padding: 10px 20px; border: none; background: none; cursor: pointer; font-size: 16px; font-weight: bold; color: #7f8c8d; border-bottom: 3px solid transparent; }}
-                .tab-btn.active {{ color: #3498db; border-bottom-color: #3498db; }}
-                .tab-content {{ display: none; }}
-                .tab-content.active {{ display: block; }}
-                table {{ width: 100%; border-collapse: collapse; margin-top: 15px; }}
-                th, td {{ padding: 12px; border: 1px solid #ddd; text-align: left; }}
-                th {{ background-color: #f8f9fa; color: #2c3e50; }}
-                .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin-bottom: 25px; }}
-                .stat-card {{ background: #ecf0f1; padding: 15px; border-radius: 8px; text-align: center; }}
-                .stat-label {{ font-size: 12px; color: #7f8c8d; display: block; }}
-                .stat-value {{ font-size: 18px; font-weight: bold; color: #2980b9; }}
-                .report-box {{ background: #fdf9f3; border-left: 5px solid #f39c12; padding: 20px; border-radius: 4px; font-style: italic; white-space: pre-wrap; }}
-                .m-buy {{ color: #e74c3c; font-weight: bold; }}
-                .m-sell {{ color: #3498db; font-weight: bold; }}
-                .graph-img {{ width: 100%; border: 1px solid #ddd; border-radius: 8px; margin: 20px 0; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>📈 퀀트 시뮬레이션 결과 보고서</h1>
-                <p><strong>수집 조건:</strong> {query} | <strong>매수:</strong> {buy_logic} | <strong>매도:</strong> {sell_logic}</p>
-
-                <div class="tabs">
-                    <button class="tab-btn active" onclick="showTab('summary')">종합 요약</button>
-                    <button class="tab-btn" onclick="showTab('trades')">상세 매매 기록</button>
-                    <button class="tab-btn" onclick="showTab('raw_data')">수익률 추이</button>
-                </div>
-
-                <div id="summary" class="tab-content active">
-                    <div class="stats-grid">
-                        <div class="stat-card"><span class="stat-label">누적 수익률</span><span class="stat-value">{stats.get('Total Return', '0%')}</span></div>
-                        <div class="stat-card"><span class="stat-label">B&H 수익률</span><span class="stat-value">{stats.get('BnH Return', '0%')}</span></div>
-                        <div class="stat-card"><span class="stat-label">KOSPI 수익률</span><span class="stat-value">{stats.get('KOSPI Return', '0%')}</span></div>
-                        <div class="stat-card"><span class="stat-label">CAGR</span><span class="stat-value">{stats.get('CAGR', '0%')}</span></div>
-                        <div class="stat-card"><span class="stat-label">MDD</span><span class="stat-value">{stats.get('MDD', '0%')}</span></div>
-                        <div class="stat-card"><span class="stat-label">샤프 지수</span><span class="stat-value">{stats.get('Sharpe', '0')}</span></div>
-                    </div>
-                    
-                    {f'<h3>📊 성과 그래프</h3><img src="data:image/png;base64,{graph_base64}" class="graph-img">' if graph_base64 else ''}
-
-                    <h3>🤖 AI 투자 전략 분석</h3>
-                    <div class="report-box">{ai_report}</div>
-                </div>
-
-                <div id="trades" class="tab-content">
-                    <h3>📃 매매 히스토리</h3>
-                    <table>
-                        <thead>
-                            <tr><th>날짜</th><th>구분</th><th>종목명</th><th>가격</th><th>수량</th><th>수익률</th></tr>
-                        </thead>
-                        <tbody>
-                            {"".join([f"<tr><td>{t['date']}</td><td class='{'m-buy' if '매수' in t['type'] or '매입' in t['type'] else 'm-sell'}'>{t['type']}</td><td>{t['name']}</td><td>{t['price']:,}원</td><td>{t['qty']}</td><td>{t.get('return', '-')}</td></tr>" for t in trades])}
-                        </tbody>
-                    </table>
-                </div>
-
-                <div id="raw_data" class="tab-content">
-                    <h3>📊 일별 누적 수익률 (%)</h3>
-                    <table>
-                        <thead>
-                            <tr><th>날짜</th><th>전략</th><th>B&H</th><th>KOSPI</th></tr>
-                        </thead>
-                        <tbody>
-                            {"".join([f"<tr><td>{r['Date']}</td><td>{r['Strategy']:.2f}%</td><td>{r['BnH']:.2f}%</td><td>{r.get('KOSPI', 0):.2f}%</td></tr>" for r in returns])}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            <script>
-                function showTab(tabId) {{
-                    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-                    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-                    document.getElementById(tabId).classList.add('active');
-                    event.currentTarget.classList.add('active');
-                }}
-            </script>
-        </body>
-        </html>
-        """
+        with app.app_context():
+            html_content = render_template(
+                'report.html',
+                query=query, buy_logic=buy_logic, sell_logic=sell_logic,
+                stats=stats, ai_report=ai_report,
+                graph_base64=graph_base64, trades=trades, returns=returns,
+            )
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(html_content)
             
@@ -248,8 +191,7 @@ def run_backtest():
     gemini_key = data.get('gemini_key', '')
     dart_key = data.get('dart_key', '')
     
-    global progress_state
-    progress_state = {"status": "running", "progress": 0, "logs": [], "error": None}
+    progress_tracker.reset("running")
     
     if not target_companies or not buy_logic or not sell_logic:
         err = "Missing required logic or target companies"
@@ -325,7 +267,7 @@ def run_backtest():
         result['report_file'] = filename
             
         update_progress(100, "시뮬레이션 완료!")
-        progress_state["status"] = "done"
+        progress_tracker.set_status("done")
             
         return jsonify({
             "status": "success",
@@ -373,7 +315,6 @@ def generate_logic_with_gemini():
 """
 
     try:
-        from google import genai
         client = genai.Client(api_key=gemini_key)
         
         def generate_stream():
@@ -460,7 +401,6 @@ def fast_backtest_parse():
         }
         """
         
-        from google.genai import types
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[sys_prompt + "\n사용자 입력: " + text],
@@ -473,8 +413,7 @@ def fast_backtest_parse():
         res_text = response.text.strip()
         try:
             parsed = json.loads(res_text)
-        except:
-            import re
+        except Exception:
             match = re.search(r'\{.*\}', res_text, re.DOTALL)
             if match:
                 parsed = json.loads(match.group(0))
@@ -551,7 +490,6 @@ def download_memory(filename):
     dir_name = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Memories")
     return send_from_directory(dir_name, filename, as_attachment=True)
 
-import socket
 def get_available_port(start_port=7861, end_port=7898):
     for port in range(start_port, end_port + 1):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -563,23 +501,13 @@ def get_available_port(start_port=7861, end_port=7898):
                 continue
     return start_port
 
-fin_progress_state = {"status": "idle", "progress": 0, "logs": [], "error": None}
+fin_tracker = ProgressTracker(error_sets_status=True)
+update_fin_progress = fin_tracker.update
+
 
 @app.route('/update_financials/progress', methods=['GET'])
 def get_fin_progress():
-    global fin_progress_state
-    return jsonify(fin_progress_state)
-
-def update_fin_progress(pct, msg, error_enc=None):
-    global fin_progress_state
-    if error_enc:
-        fin_progress_state["error"] = error_enc
-        fin_progress_state["status"] = "error"
-    if pct is not None:
-        fin_progress_state["progress"] = pct
-    if msg:
-        now_str = datetime.now().strftime('%H:%M:%S')
-        fin_progress_state["logs"].append(f"[{now_str}] {msg}")
+    return jsonify(fin_tracker.snapshot())
 
 @app.route('/update_financials', methods=['POST'])
 def run_update_financials():
@@ -588,18 +516,16 @@ def run_update_financials():
     if not dart_key:
         return jsonify({"status": "error", "message": "DART API 키가 제공되지 않았습니다."}), 400
         
-    global fin_progress_state
-    fin_progress_state = {"status": "updating", "progress": 0, "logs": [], "error": None}
-    
+    fin_tracker.reset("updating")
+
     def background_update():
         try:
             logic_mgr.update_financial_data(dart_key, update_fin_progress)
-            fin_progress_state["status"] = "done"
+            fin_tracker.set_status("done")
             update_fin_progress(100, "재무제표 업데이트 성공적으로 완료")
         except Exception as e:
             update_fin_progress(None, f"업데이트 실패: {str(e)}", str(e))
 
-    import threading
     th = threading.Thread(target=background_update)
     th.daemon = True
     th.start()

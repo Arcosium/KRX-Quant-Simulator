@@ -1,14 +1,112 @@
-import sys
 import os
 import re
+import ast
 import time
+import logging
+import operator
+import zipfile
+import sqlite3
+import datetime as dt
+from io import BytesIO
+from xml.etree import ElementTree as ET
+
 import pandas as pd
 import numpy as np
 import requests
-import sqlite3
-import ctypes
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
+
+# 외부 HTTP 호출 기본 타임아웃(초). 응답이 없을 때 백테스트 스레드가
+# 무한 대기하지 않도록 모든 requests 호출에 강제한다.
+HTTP_TIMEOUT = 10
+
+
+class SafeExprError(Exception):
+    """safe_expr 가 허용하지 않는 노드/구문을 만났을 때."""
+
+
+_BIN_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod, ast.Pow: operator.pow,
+}
+_CMP_OPS = {
+    ast.Lt: operator.lt, ast.Gt: operator.gt, ast.LtE: operator.le,
+    ast.GtE: operator.ge, ast.Eq: operator.eq, ast.NotEq: operator.ne,
+}
+_UNARY_OPS = {ast.UAdd: operator.pos, ast.USub: operator.neg, ast.Not: operator.not_}
+
+
+def safe_expr(expr, names=None):
+    """내장 평가 함수를 대체하는 ast 화이트리스트 평가기.
+
+    숫자/불리언 리터럴, 비교(체이닝 포함), and/or/not, 사칙·거듭제곱,
+    괄호, 단항 ±, names 로 주입한 식별자만 허용한다. 함수 호출·속성
+    접근·구독·람다·import 등 그 외 노드는 SafeExprError 로 거부한다.
+    허용 식에 대해서는 파이썬 표준 의미(단축평가 반환값 포함)와 동일.
+    """
+    names = names or {}
+    try:
+        tree = ast.parse(expr, mode='eval')
+    except SyntaxError as e:
+        raise SafeExprError(f"syntax error: {e}")
+    return _safe_visit(tree.body, names)
+
+
+def _safe_visit(node, names):
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id in names:
+            return names[node.id]
+        raise SafeExprError(f"unknown name: {node.id}")
+    if isinstance(node, ast.BoolOp):
+        if isinstance(node.op, ast.And):
+            result = True
+            for v in node.values:
+                result = _safe_visit(v, names)
+                if not result:
+                    return result
+            return result
+        result = False
+        for v in node.values:
+            result = _safe_visit(v, names)
+            if result:
+                return result
+        return result
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY_OPS:
+        return _UNARY_OPS[type(node.op)](_safe_visit(node.operand, names))
+    if isinstance(node, ast.BinOp) and type(node.op) in _BIN_OPS:
+        return _BIN_OPS[type(node.op)](_safe_visit(node.left, names),
+                                       _safe_visit(node.right, names))
+    if isinstance(node, ast.Compare):
+        left = _safe_visit(node.left, names)
+        for op, comparator in zip(node.ops, node.comparators):
+            op_type = type(op)
+            if op_type not in _CMP_OPS:
+                raise SafeExprError(f"operator not allowed: {op_type.__name__}")
+            right = _safe_visit(comparator, names)
+            if not _CMP_OPS[op_type](left, right):
+                return False
+            left = right
+        return True
+    raise SafeExprError(f"node not allowed: {type(node).__name__}")
+
+
+def price_on_or_before(df, date, col='Close'):
+    """date 의 종가를 반환. 해당 일자가 없으면 그 이전 마지막 거래일의
+    종가로 폴백하고, 데이터가 전혀 없으면 0 을 반환한다."""
+    try:
+        if date in df.index:
+            return df.loc[date, col]
+        prior = df[df.index < date]
+        if not prior.empty:
+            return prior.iloc[-1][col]
+    except Exception:
+        pass
+    return 0
 
 YEAR_MAPPING = {
     2024: 'D-1y_data',
@@ -114,35 +212,32 @@ class DBManager:
         res = cursor.fetchone()
         return res[0] if res and res[0] else None
 
-    def save_price_data(self, code, df):
+    def _save_timeseries(self, code, df, table, value_cols):
+        """code/date + 정수 값 컬럼을 INSERT OR IGNORE 로 저장한다.
+
+        value_cols: [(db_col, df_col), ...] — DB 컬럼과 원본 DataFrame
+        컬럼의 대응. save_price_data / save_investor_data 공통 골격.
+        """
         if df.empty: return
+        db_cols = ['code', 'date'] + [db for db, _ in value_cols]
+        placeholders = ', '.join(['?'] * len(db_cols))
+        sql = (f"INSERT OR IGNORE INTO {table} ({', '.join(db_cols)}) "
+               f"VALUES ({placeholders})")
         data = []
         for index, row in df.iterrows():
             date_str = index.strftime('%Y-%m-%d') if isinstance(index, pd.Timestamp) else str(index)[:10]
-            data.append((
-                code, date_str, 
-                int(row['Open']), int(row['High']), int(row['Low']), int(row['Close']), int(row['Volume'])
-            ))
+            data.append((code, date_str, *[int(row[src]) for _, src in value_cols]))
         with self.conn:
-            self.conn.executemany(
-                "INSERT OR IGNORE INTO price_data (code, date, open, high, low, close, volume) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                data
-            )
+            self.conn.executemany(sql, data)
+
+    def save_price_data(self, code, df):
+        self._save_timeseries(code, df, 'price_data', [
+            ('open', 'Open'), ('high', 'High'), ('low', 'Low'),
+            ('close', 'Close'), ('volume', 'Volume')])
 
     def save_investor_data(self, code, df):
-        if df.empty: return
-        data = []
-        for index, row in df.iterrows():
-            date_str = index.strftime('%Y-%m-%d') if isinstance(index, pd.Timestamp) else str(index)[:10]
-            data.append((
-                code, date_str,
-                int(row['Inst_Net_Volume']), int(row['Foreign_Net_Volume'])
-            ))
-        with self.conn:
-            self.conn.executemany(
-                "INSERT OR IGNORE INTO investor_data (code, date, inst_net, foreign_net) VALUES (?, ?, ?, ?)",
-                data
-            )
+        self._save_timeseries(code, df, 'investor_data', [
+            ('inst_net', 'Inst_Net_Volume'), ('foreign_net', 'Foreign_Net_Volume')])
 
     def load_price_data(self, code):
         query = "SELECT date, open, high, low, close, volume FROM price_data WHERE code=? ORDER BY date ASC"
@@ -204,7 +299,7 @@ class CrawlerUtil:
             search_pages = min(max_pages, 400)
             for page in range(1, search_pages + 1):
                 url = f"https://finance.naver.com/sise/sise_index_day.nhn?code=KOSPI&page={page}"
-                res = requests.get(url, headers=headers)
+                res = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
                 soup = BeautifulSoup(res.text, 'lxml')
                 rows = soup.select('table.type_1 tr')
                 valid_rows = 0
@@ -222,9 +317,9 @@ class CrawlerUtil:
                         close = float(close_text)
                         result.append({'Date': date, 'Close': close})
                         valid_rows += 1
-                    except: continue
+                    except Exception: continue
                 if valid_rows == 0 and page > 1: break
-        except: pass
+        except Exception: pass
         if not result: return pd.DataFrame()
         return pd.DataFrame(result).drop_duplicates(subset=['Date']).sort_values('Date').set_index('Date')
 
@@ -238,7 +333,7 @@ class CrawlerUtil:
             search_pages = min(max_pages, 400) 
             for page in range(1, search_pages + 1):
                 url = f"https://finance.naver.com/item/sise_day.nhn?code={code}&page={page}"
-                res = requests.get(url, headers=headers)
+                res = requests.get(url, headers=headers, timeout=HTTP_TIMEOUT)
                 soup = BeautifulSoup(res.text, 'lxml')
                 rows = soup.select('table.type2 tr')
                 valid_rows = 0
@@ -260,9 +355,9 @@ class CrawlerUtil:
                         volume = int(cols[6].text.replace(',', ''))
                         result.append({'Date': date, 'Open': open_, 'High': high, 'Low': low, 'Close': close, 'Volume': volume})
                         valid_rows += 1
-                    except: continue
+                    except Exception: continue
                 if valid_rows == 0 and page > 1: break
-        except: pass
+        except Exception: pass
         if not result: return pd.DataFrame()
         return pd.DataFrame(result).drop_duplicates(subset=['Date']).sort_values('Date').reset_index(drop=True)
 
@@ -304,13 +399,13 @@ class CrawlerUtil:
                             foreign_net_vol = int(fore_text.replace(',', '').replace('+', ''))
                             result.append({'Date': date, 'Inst_Net_Volume': inst_net_vol, 'Foreign_Net_Volume': foreign_net_vol})
                             valid_on_page += 1
-                        except: continue
+                        except Exception: continue
                     if valid_on_page == 0 and page > 5: break
                     next_page = soup.select_one('td.pgR a')
                     if not next_page:
                          if page > 10: break
-                except: continue
-        except: return pd.DataFrame()
+                except Exception: continue
+        except Exception: return pd.DataFrame()
         df = pd.DataFrame(result)
         if df.empty: return df
         return df.sort_values('Date').reset_index(drop=True)
@@ -531,7 +626,7 @@ class QuantLogic:
             if os.path.exists(file_path):
                 try:
                     df = pd.read_csv(file_path, encoding='utf-8-sig')
-                except:
+                except Exception:
                     df = pd.read_csv(file_path, encoding='cp949')
                 if '종목코드' in df.columns:
                     df['종목코드'] = df['종목코드'].astype(str).str.zfill(6)
@@ -544,11 +639,11 @@ class QuantLogic:
             mask = grp['account_nm'].str.strip() == kw
             if mask.any():
                 try: return float(str(grp.loc[mask, col].iloc[0]).replace(',', ''))
-                except: pass
+                except Exception: pass
             mask = grp['account_nm'].str.contains(kw, na=False, regex=False)
             if mask.any():
                 try: return float(str(grp.loc[mask, col].iloc[0]).replace(',', ''))
-                except: pass
+                except Exception: pass
         return 0.0
 
     def _fetch_naver_market_data(self, progress_callback=None):
@@ -616,8 +711,6 @@ class QuantLogic:
     def _get_year_end_price(self, code, year):
         """연도 연말 종가 반환 (12/31 → 12/30 → 12/29 → 12/28 순서).
         SQLite 캐시 우선 조회, 없으면 네이버 sise_day 크롤링."""
-        import datetime as dt
-
         candidates = []
         for day in [31, 30, 29, 28]:
             try:
@@ -692,7 +785,7 @@ class QuantLogic:
 
         def to_float(v):
             try: return float(str(v).replace(',', '').strip())
-            except: return 0.0
+            except Exception: return 0.0
 
         fin_df['amt']      = fin_df['thstrm_amount'].apply(to_float)
         fin_df['prev_amt'] = fin_df['frmtrm_amount'].apply(to_float) if 'frmtrm_amount' in fin_df.columns else 0.0
@@ -828,8 +921,6 @@ class QuantLogic:
         3단계: 네이버 현재가 + 연말주가로 시장 지표 계산 후 CSV 저장
         """
         global YEAR_MAPPING
-        import zipfile as _zf, io as _io
-        from xml.etree import ElementTree as ET
 
         DART_BASE = 'https://opendart.fss.or.kr/api'
 
@@ -855,7 +946,7 @@ class QuantLogic:
         if progress_callback: progress_callback(5, "전체 상장사 corp_code 목록 수집 중...")
         try:
             resp = requests.get(f'{DART_BASE}/corpCode.xml?crtfc_key={dart_key}', timeout=30)
-            z    = _zf.ZipFile(_io.BytesIO(resp.content))
+            z    = zipfile.ZipFile(BytesIO(resp.content))
             tree = ET.fromstring(z.read('CORPCODE.xml'))
             corps    = []   # [{corp_code, stock_code, corp_name}]
             name_map = {}   # stock_code -> corp_name
@@ -883,7 +974,7 @@ class QuantLogic:
                 if p.get('status') == '000' and p.get('list'):
                     latest_dart_year = test_year
                     break
-            except:
+            except Exception:
                 continue
         if progress_callback:
             progress_callback(12, f"CSV 기준연도: {current_csv_year}년 | DART 최신연도: {latest_dart_year}년")
@@ -927,7 +1018,7 @@ class QuantLogic:
                             if progress_callback:
                                 progress_callback(None, f"일치: {comp.get('기업명', code)} "
                                                         f"ROE={csv_roe:.2f}% ≈ {dart_roe:.2f}%")
-                    except:
+                    except Exception:
                         continue
 
                 if not is_outdated and verified_count == 0:
@@ -971,7 +1062,7 @@ class QuantLogic:
                                        'bsns_year': year, 'reprt_code': '11011'})
                         if jo.get('status') == '000' and jo.get('list'):
                             all_rows.extend(jo['list'])
-                    except:
+                    except Exception:
                         continue
                     time.sleep(0.05)
 
@@ -1049,8 +1140,8 @@ class QuantLogic:
                 if not d or real_metric not in d: return "False"
                 try:
                     if float(d[real_metric]) == 0: return "False"
-                    if not eval(f"{d[real_metric]} {op} {limit}"): return "False"
-                except: return "False"
+                    if not safe_expr(f"{d[real_metric]} {op} {limit}"): return "False"
+                except Exception: return "False"
             return "True"
         def repl_basic(match):
             metric, op, v_str = match.groups()
@@ -1061,12 +1152,12 @@ class QuantLogic:
             try:
                 if float(d[real_metric]) == 0: return "False"
                 return f"{d[real_metric]} {op} {v_str}"
-            except: return "False"
+            except Exception: return "False"
         try:
             q = re.sub(r"([가-힣a-zA-Z0-9\/]+)\s*\*\s*(\d+)\s*([><=!]+)\s*(-?[\d\.]+)", repl_series, query)
             q = re.sub(r"([가-힣a-zA-Z0-9\/]+)\s*([><=!]+)\s*(-?[\d\.]+)", repl_basic, q)
-            return eval(q)
-        except: return False
+            return safe_expr(q)
+        except Exception: return False
 
     def run_financial_filter(self, query):
         current_data_key = 'D-1y_data'
@@ -1076,7 +1167,7 @@ class QuantLogic:
             for comp in self.financial_data[current_data_key]:
                 if self.evaluate_financial_query(comp['종목코드'], query):
                     filtered_companies.append(comp.copy())
-        except: pass
+        except Exception: pass
         return filtered_companies
 
     def evaluate_logic(self, logic_str, row):
@@ -1101,7 +1192,7 @@ class QuantLogic:
         expr = expr.replace("AND", "and").replace("OR", "or")
         expr = expr.replace("TRUE", "True").replace("FALSE", "False")
         try:
-            return eval(expr)
+            return safe_expr(expr)
         except Exception as e:
             raise Exception(f"구문 오류 ({logic_str} -> {expr}): {str(e)}")
 
@@ -1139,7 +1230,7 @@ class QuantLogic:
             if years > 0 and start_val > 0 and end_val > 0:
                 cagr = ((end_val / start_val) ** (1/years) - 1) * 100
             else: cagr = 0
-        except: cagr = 0
+        except Exception: cagr = 0
         rolling_max = value_series.cummax()
         drawdown = (value_series - rolling_max) / rolling_max
         mdd = drawdown.min() * 100 
@@ -1155,7 +1246,7 @@ class QuantLogic:
             if daily_ret.std() == 0: sharpe = 0
             else:
                 sharpe = (daily_ret.mean() / daily_ret.std()) * np.sqrt(252)
-        except: sharpe = 0
+        except Exception: sharpe = 0
         return {
             "Total Return": f"{total_return:.2f}%",
             "CAGR": f"{cagr:.2f}%",
@@ -1192,105 +1283,157 @@ class QuantLogic:
             "lower": lower_bound.tolist()
         }
 
-    def run_backtest_logic(self, target_companies, buy_logic, sell_logic, period_months, mc_period_str, portfolio_strategy='equal_weight', use_tax_fee=False, dart_key='', progress_callback=None):
-        fetch_years = (period_months / 12) + 2
+    # 휴리스틱 고정 비중 전략 (정교한 최적화 미구현 — 의도된 단순 근사).
+    # equal_weight·all_in·inverse_volatility 는 아래에서 실제 계산한다.
+    ALLOCATION_CONSTANTS = {
+        'risk_parity': 0.10, 'kelly_criterion': 0.15, 'momentum_weight': 0.12,
+        'min_variance': 0.08, 'max_sharpe': 0.10, 'market_cap': 0.05,
+        'dynamic_asset': 0.20,
+    }
+    DEFAULT_ALLOCATION = 0.10
+    VOL_WINDOW = 60
+
+    def _trailing_vol(self, df, date, window=VOL_WINDOW):
+        """date 시점까지 최근 window 거래일의 일간 수익률 표준편차.
+        계산 불가(데이터 부족·0·비유한)면 None."""
+        try:
+            hist = df[df.index <= date]['Close'].tail(window + 1)
+            if len(hist) < 3:
+                return None
+            sd = float(hist.pct_change().dropna().std())
+            if not np.isfinite(sd) or sd <= 0:
+                return None
+            return sd
+        except Exception:
+            return None
+
+    def _allocation_ratio(self, strategy, code, date, processed_data,
+                          holdings, buy_signals_count):
+        """매수 1건에 투입할 현재 포트폴리오 대비 비중을 전략별로 결정.
+
+        - equal_weight     : 신호+보유 종목 균등 (기존 동작 보존)
+        - all_in           : 전량 집중
+        - inverse_volatility: 거래 유니버스 내 변동성 역수 정규화 가중
+        - 그 외            : ALLOCATION_CONSTANTS 휴리스틱 고정 비중
+        """
+        if strategy == 'equal_weight':
+            return 1.0 / max(1, buy_signals_count + len(holdings))
+        if strategy == 'all_in':
+            return 1.0
+        if strategy == 'inverse_volatility':
+            inv = {}
+            for c, info in processed_data.items():
+                sd = self._trailing_vol(info['df'], date)
+                if sd is not None:
+                    inv[c] = 1.0 / sd
+            total = sum(inv.values())
+            if code not in inv or total <= 0:
+                return self.DEFAULT_ALLOCATION
+            return inv[code] / total
+        return self.ALLOCATION_CONSTANTS.get(strategy, self.DEFAULT_ALLOCATION)
+
+    INITIAL_CAPITAL = 100_000_000
+    FIXED_INVESTMENT_PER_STOCK = 10_000_000
+
+    DART_EVENT_KEYWORDS = {
+        '유상증자':  'Event_RightIssue',
+        '무상증자':  'Event_BonusIssue',
+        '자사주취득': 'Event_TreasuryAcq',
+        '자사주처분': 'Event_TreasuryDisp',
+        '주식분할':  'Event_StockSplit',
+        '감자':      'Event_CapitalReduction',
+        '합병':      'Event_Merger',
+        '타법인주식취득': 'Event_Acquisition',
+        '단일판매':  'Event_Supply',
+        '공급계약':  'Event_Supply',
+        '전환사채':  'Event_CB',
+        '신주인수권부사채': 'Event_BW',
+        '교환사채':  'Event_EB',
+        '배당':      'Event_Dividend',
+        '유형자산':  'Event_AssetAcq',
+        '영업양수도': 'Event_BizTransfer',
+    }
+
+    def _collect_dart_events(self, target_companies, buy_logic, sell_logic,
+                             period_months, dart_key, progress_callback=None):
+        """식에 DART 공시 키워드가 있을 때만 종목별 이벤트 맵을 수집한다.
+        반환: {code: {'YYYY-MM-DD': {'Event_*': 1}, ...}} (없으면 빈 dict)."""
+        events_to_fetch = [k for k in self.DART_EVENT_KEYWORDS
+                           if k in buy_logic or k in sell_logic]
+        event_map = {}
+        if not (events_to_fetch and dart_key):
+            return event_map
+        if progress_callback:
+            progress_callback(2, f"DART 공시 데이터 수집 중 ({', '.join(events_to_fetch)})...")
+        try:
+            # 선택적·무거운 의존성. DART 공시 이벤트가 식에 포함된
+            # 경우에만 지연 로드한다(미설치 환경에서도 일반 백테스트 동작).
+            import OpenDartReader
+            dart = OpenDartReader(dart_key)
+            start_dt = (datetime.today() - timedelta(days=period_months * 30 + 100)).strftime("%Y%m%d")
+            end_dt   = datetime.today().strftime("%Y%m%d")
+
+            for comp in target_companies:
+                code = str(comp['종목코드']).zfill(6)
+
+                # 캐시 확인 — 이미 저장된 이벤트가 있으면 DB에서 로드
+                if self.db_manager.has_event_cache(code):
+                    cached = self.db_manager.load_event_data(code)
+                    if cached:
+                        event_map[code] = cached
+                    continue
+
+                try:
+                    # 전체 공시 조회 (모든 종류의 이벤트 탐색을 위함)
+                    reports = dart.list(code, start=start_dt, end=end_dt)
+                    code_events = {}
+                    if reports is not None and not reports.empty:
+                        for _, r in reports.iterrows():
+                            report_nm = str(r.get('report_nm', ''))
+                            rcept_dt  = str(r.get('rcept_dt', ''))
+                            if len(rcept_dt) < 8:
+                                continue
+                            date_key = f"{rcept_dt[:4]}-{rcept_dt[4:6]}-{rcept_dt[6:8]}"
+                            for keyword, col_name in self.DART_EVENT_KEYWORDS.items():
+                                if keyword in events_to_fetch and keyword in report_nm:
+                                    code_events.setdefault(date_key, {})[col_name] = 1
+
+                    event_map[code] = code_events
+                    # 빈 결과도 캐시에 저장해 중복 API 호출 방지
+                    # (빈 dict는 has_event_cache가 False를 반환하므로 sentinel row 삽입)
+                    if not code_events:
+                        self.db_manager.save_event_data(code, {'__none__': {'__none__': 0}})
+                    else:
+                        self.db_manager.save_event_data(code, code_events)
+
+                    time.sleep(0.15)  # DART API 속도 제한 대응
+                except Exception as e:
+                    logger.warning("DART 이벤트 수집 오류 (%s): %s", code, e)
+        except Exception as e:
+            logger.warning("DART 이벤트 수집 전체 오류: %s", e)
+        return event_map
+
+    def _prepare_company_data(self, target_companies, buy_logic, sell_logic,
+                              fetch_years, event_map, progress_callback=None):
+        """종목별 가격/투자자 데이터를 캐시·크롤링으로 확보하고 지표·권리락
+        보정·DART 이벤트를 반영한 분석용 DataFrame 묶음을 만든다."""
         processed_data = {}
         total_comps = len(target_companies)
-        
-        # ── DART 공시 이벤트 수집 ──────────────────────────────────────────────────
-        DART_EVENT_KEYWORDS = {
-            '유상증자':  'Event_RightIssue',
-            '무상증자':  'Event_BonusIssue',
-            '자사주취득': 'Event_TreasuryAcq',
-            '자사주처분': 'Event_TreasuryDisp',
-            '주식분할':  'Event_StockSplit',
-            '감자':      'Event_CapitalReduction',
-            '합병':      'Event_Merger',
-            '타법인주식취득': 'Event_Acquisition',
-            '단일판매':  'Event_Supply',
-            '공급계약':  'Event_Supply',
-            '전환사채':  'Event_CB',
-            '신주인수권부사채': 'Event_BW',
-            '교환사채':  'Event_EB',
-            '배당':      'Event_Dividend',
-            '유형자산':  'Event_AssetAcq',
-            '영업양수도': 'Event_BizTransfer'
-        }
-
-        events_to_fetch = [k for k in DART_EVENT_KEYWORDS
-                           if k in buy_logic or k in sell_logic]
-
-        # event_map: {code: {'2024-03-15': {'Event_BonusIssue': 1}, ...}}
-        event_map = {}
-        if events_to_fetch and dart_key:
-            if progress_callback:
-                progress_callback(2, f"DART 공시 데이터 수집 중 ({', '.join(events_to_fetch)})...")
-            try:
-                import OpenDartReader
-                dart = OpenDartReader(dart_key)
-                start_dt = (datetime.today() - timedelta(days=period_months * 30 + 100)).strftime("%Y%m%d")
-                end_dt   = datetime.today().strftime("%Y%m%d")
-
-                for comp_idx, comp in enumerate(target_companies):
-                    code = str(comp['종목코드']).zfill(6)
-
-                    # 캐시 확인 — 이미 저장된 이벤트가 있으면 DB에서 로드
-                    if self.db_manager.has_event_cache(code):
-                        cached = self.db_manager.load_event_data(code)
-                        if cached:
-                            event_map[code] = cached
-                        continue
-
-                    try:
-                        # 전체 공시 조회 (모든 종류의 이벤트 탐색을 위함)
-                        reports = dart.list(code, start=start_dt, end=end_dt)
-                        code_events = {}
-                        if reports is not None and not reports.empty:
-                            for _, r in reports.iterrows():
-                                report_nm = str(r.get('report_nm', ''))
-                                rcept_dt  = str(r.get('rcept_dt', ''))
-                                if len(rcept_dt) < 8:
-                                    continue
-                                date_key = f"{rcept_dt[:4]}-{rcept_dt[4:6]}-{rcept_dt[6:8]}"
-                                for keyword, col_name in DART_EVENT_KEYWORDS.items():
-                                    if keyword in events_to_fetch and keyword in report_nm:
-                                        code_events.setdefault(date_key, {})[col_name] = 1
-
-                        event_map[code] = code_events
-                        # 빈 결과도 캐시에 저장해 중복 API 호출 방지
-                        # (빈 dict는 has_event_cache가 False를 반환하므로 sentinel row 삽입)
-                        if not code_events:
-                            self.db_manager.save_event_data(code, {'__none__': {'__none__': 0}})
-                        else:
-                            self.db_manager.save_event_data(code, code_events)
-
-                        time.sleep(0.15)  # DART API 속도 제한 대응
-                    except Exception as e:
-                        print(f"DART 이벤트 수집 오류 ({code}): {e}")
-
-            except Exception as e:
-                print(f"DART 이벤트 수집 전체 오류: {e}")
-
-        if progress_callback: progress_callback(5, f"KOSPI 지수 및 기초 데이터 수집 중...")
-        kospi_df = CrawlerUtil.fetch_kospi_index(years=fetch_years)
-        if not kospi_df.empty:
-            kospi_df = kospi_df[['Close']].rename(columns={'Close': 'KOSPI'})
-
         for idx, comp in enumerate(target_companies):
             code = str(comp['종목코드']).zfill(6)
             name = comp.get('기업명', code)
             if progress_callback: progress_callback(10 + int((idx/total_comps)*30), f"[{idx+1}/{total_comps}] {name} 데이터 확인 중...")
-            
+
             latest_price_date_str = self.db_manager.get_latest_date(code, 'price_data')
             latest_price_date = pd.to_datetime(latest_price_date_str) if latest_price_date_str else None
-            
+
             if latest_price_date is None or latest_price_date.date() < datetime.today().date():
                 if progress_callback: progress_callback(None, f"[{idx+1}/{total_comps}] {name} 최신 가격 데이터 크롤링 중 (Naver)...")
                 new_price_df = CrawlerUtil.fetch_naver_stock_html(code, years=fetch_years, stop_date=latest_price_date)
                 if not new_price_df.empty:
                     new_price_df.set_index('Date', inplace=True)
                     self.db_manager.save_price_data(code, new_price_df)
-            
+
             price_df = self.db_manager.load_price_data(code)
             if price_df.empty: continue
             # 권리락(액면분할·무상증자·유상증자 등) 보정 — 원주가 갭을 실손익으로 오인하지 않도록
@@ -1299,7 +1442,7 @@ class QuantLogic:
 
             latest_inv_date_str = self.db_manager.get_latest_date(code, 'investor_data')
             latest_inv_date = pd.to_datetime(latest_inv_date_str) if latest_inv_date_str else None
-            
+
             if latest_inv_date is None or latest_inv_date.date() < datetime.today().date():
                 if progress_callback: progress_callback(None, f"[{idx+1}/{total_comps}] {name} 투자자 데이터 크롤링 중 (Naver)...")
                 new_inv_df = CrawlerUtil.fetch_investor_data(code, years=fetch_years, stop_date=latest_inv_date)
@@ -1308,7 +1451,7 @@ class QuantLogic:
                     self.db_manager.save_investor_data(code, new_inv_df)
 
             investor_df = self.db_manager.load_investor_data(code)
-            
+
             if not investor_df.empty:
                 df = price_df.join(investor_df, how='left')
                 df['Inst_Net_Volume'] = df['Inst_Net_Volume'].fillna(0)
@@ -1325,11 +1468,11 @@ class QuantLogic:
             if code in event_map:
                 for date_str, cols in event_map[code].items():
                     try:
-                        dt = pd.Timestamp(date_str)
-                        if dt in df.index:
+                        ts = pd.Timestamp(date_str)
+                        if ts in df.index:
                             for col, val in cols.items():
                                 if col in df.columns:
-                                    df.loc[dt, col] = val
+                                    df.loc[ts, col] = val
                     except Exception:
                         pass
 
@@ -1337,80 +1480,62 @@ class QuantLogic:
             df, s_logic = self.preprocess_consecutive_logic(df, sell_logic)
 
             processed_data[code] = {"df": df, "b_logic": b_logic, "s_logic": s_logic}
+        return processed_data
 
-        if not processed_data:
-            return {"error": "데이터 수집 실패"}
+    def _run_daily_simulation(self, processed_data, sim_dates, portfolio_strategy,
+                              use_tax_fee, name_by_code, progress_callback=None):
+        """일별 매수/매도 시뮬레이션. 전략 곡선·벤치마크 곡선·체결 내역과
+        승률 통계를 담은 dict 를 반환한다(로직 오류 시 {'error': ...})."""
+        portfolio_curve = []
+        benchmark_curve = []
 
-        all_dates_raw = sorted(list(set().union(*[v['df'].index for v in processed_data.values()])))
-        end_date = datetime.today()
-        start_date = end_date - timedelta(days=period_months * 30)
-        sim_dates = [d for d in all_dates_raw if start_date <= d <= end_date]
-        
-        if not sim_dates: return {"error": "선택한 기간에 해당하는 데이터가 충분하지 않습니다."}
-
-        portfolio_curve = [] 
-        benchmark_curve = [] 
-        
-        initial_capital = 100000000
-        cash = initial_capital
-        holdings = {} 
+        cash = self.INITIAL_CAPITAL
+        holdings = {}
         buy_prices = {}
         trade_count = 0
         win_count = 0
         total_profit = 0
         total_loss = 0
-        
+
         bnh_holdings = {}
         bnh_cost_basis = 0
-        FIXED_INVESTMENT_PER_STOCK = 10000000
-        
-        trade_history_logs = [] # To store all trade events
-
-        if progress_callback: progress_callback(45, "데이터 수집 완료. 백테스트 일별 시뮬레이션을 시작합니다...")
+        trade_history_logs = []
 
         COMMISSION_RATE = 0.00015 if use_tax_fee else 0.0
         TRANSACTION_TAX = 0.0018 if use_tax_fee else 0.0
-        
+
         for d_idx, date in enumerate(sim_dates):
             if d_idx % (len(sim_dates)//10 + 1) == 0 and progress_callback:
                 pct = 45 + int((d_idx/len(sim_dates)) * 40)
                 progress_callback(pct, f"[{date.strftime('%Y-%m-%d')}] 수익률 평가 및 매매 판단 중...")
-            
+
             for code in processed_data.keys():
                 if code not in bnh_holdings:
                     df = processed_data[code]['df']
                     if date in df.index:
                         price = df.loc[date, 'Close']
                         if price > 0:
-                            qty = int(FIXED_INVESTMENT_PER_STOCK // price)
+                            qty = int(self.FIXED_INVESTMENT_PER_STOCK // price)
                             cost = int(qty * price)
                             if qty > 0:
                                 bnh_holdings[code] = qty
                                 bnh_cost_basis += cost
             bnh_market_value = 0
             for code, qty in bnh_holdings.items():
-                if date in processed_data[code]['df'].index:
-                    current_price = processed_data[code]['df'].loc[date, 'Close']
-                else:
-                    try: current_price = processed_data[code]['df'][processed_data[code]['df'].index < date].iloc[-1]['Close']
-                    except: current_price = 0
+                current_price = price_on_or_before(processed_data[code]['df'], date)
                 bnh_market_value += qty * current_price
 
             if bnh_cost_basis > 0:
                 bnh_return_rate = (bnh_market_value - bnh_cost_basis) / bnh_cost_basis
-                display_bnh_value = int(initial_capital * (1 + bnh_return_rate))
-            else: display_bnh_value = initial_capital
+                display_bnh_value = int(self.INITIAL_CAPITAL * (1 + bnh_return_rate))
+            else: display_bnh_value = self.INITIAL_CAPITAL
             benchmark_curve.append({'Date': date, 'BnH': display_bnh_value})
 
             current_pf_value = cash
             for code, qty in holdings.items():
-                if date in processed_data[code]['df'].index:
-                    price = processed_data[code]['df'].loc[date, 'Close']
-                else:
-                    try: price = processed_data[code]['df'][processed_data[code]['df'].index < date].iloc[-1]['Close']
-                    except: price = 0
+                price = price_on_or_before(processed_data[code]['df'], date)
                 current_pf_value += qty * price
-            
+
             portfolio_curve.append({'Date': date, 'Strategy': current_pf_value})
 
             # Process Sells
@@ -1418,7 +1543,7 @@ class QuantLogic:
                 if date not in processed_data[code]['df'].index: continue
                 row = processed_data[code]['df'].loc[date]
                 s_logic = processed_data[code]['s_logic']
-                
+
                 try:
                     if self.evaluate_logic(s_logic, row):
                         qty = holdings[code]
@@ -1427,14 +1552,14 @@ class QuantLogic:
                         sell_amt_gross = int(qty * price)
                         sell_fee = int(sell_amt_gross * (COMMISSION_RATE + TRANSACTION_TAX))
                         sell_amt_net = sell_amt_gross - sell_fee
-                        
+
                         buy_amt_net = int(qty * buy_price) + int(qty * buy_price * COMMISSION_RATE)
                         profit = sell_amt_net - buy_amt_net
-                        
+
                         cash += sell_amt_net
                         trade_count += 1
-                        
-                        comp_name = next((c['기업명'] for c in target_companies if str(c['종목코드']).zfill(6) == code), code)
+
+                        comp_name = name_by_code.get(code, code)
                         trade_history_logs.append({
                             'date': date.strftime('%Y-%m-%d'),
                             'type': '매도',
@@ -1447,7 +1572,7 @@ class QuantLogic:
                             'return': f"{(profit/max(1, buy_amt_net)*100):.2f}%"
                         })
 
-                        if profit > 0: 
+                        if profit > 0:
                             win_count += 1
                             total_profit += profit
                         else:
@@ -1462,10 +1587,10 @@ class QuantLogic:
             for code in processed_data.keys():
                 if code in holdings: continue
                 if date not in processed_data[code]['df'].index: continue
-                
+
                 row = processed_data[code]['df'].loc[date]
                 b_logic = processed_data[code]['b_logic']
-                
+
                 try:
                     if self.evaluate_logic(b_logic, row):
                         buy_signals.append((code, row))
@@ -1476,38 +1601,21 @@ class QuantLogic:
                 available_slots = 10 - len(holdings) if portfolio_strategy != 'all_in' else 1
                 if available_slots > 0:
                     signals_to_execute = buy_signals[:available_slots]
-                    
+
                     for code, row in signals_to_execute:
                         current_pf = cash
                         for hc, hq in holdings.items():
-                            try: p = processed_data[hc]['df'][processed_data[hc]['df'].index <= date].iloc[-1]['Close']
-                            except: p = 0
+                            p = price_on_or_before(processed_data[hc]['df'], date)
                             current_pf += hq * p
-                            
-                        # 포트폴리오 배분 전략 할당
-                        if portfolio_strategy == 'equal_weight':
-                            alloc_ratio = 1.0 / max(1, len(buy_signals) + len(holdings))
-                        elif portfolio_strategy == 'all_in':
-                            alloc_ratio = 1.0
-                        elif portfolio_strategy == 'risk_parity':
-                            alloc_ratio = 0.1 # 간단히 10%
-                        elif portfolio_strategy == 'kelly_criterion':
-                            alloc_ratio = 0.15 # 간단히 15%
-                        elif portfolio_strategy == 'momentum_weight':
-                            alloc_ratio = 0.12 # 간단히 12%
-                        elif portfolio_strategy == 'min_variance':
-                            alloc_ratio = 0.08
-                        elif portfolio_strategy == 'max_sharpe':
-                            alloc_ratio = 0.1
-                        elif portfolio_strategy == 'market_cap':
-                            alloc_ratio = 0.05
-                        elif portfolio_strategy == 'inverse_volatility':
-                            alloc_ratio = 0.07
-                        elif portfolio_strategy == 'dynamic_asset':
-                            alloc_ratio = 0.2
-                        else:
-                            alloc_ratio = 0.1
-                        
+
+                        # 포트폴리오 배분 전략 할당 (전략별 디스패치)
+                        alloc_ratio = self._allocation_ratio(
+                            portfolio_strategy, code, date,
+                            processed_data=processed_data,
+                            holdings=holdings,
+                            buy_signals_count=len(buy_signals),
+                        )
+
                         invest_amount_gross = int(current_pf * alloc_ratio)
                         if invest_amount_gross > cash: invest_amount_gross = cash
 
@@ -1522,7 +1630,7 @@ class QuantLogic:
                             total_cost = int(qty * cost_per_share_incl_fee)
                             cash -= total_cost
                             buy_prices[code] = price
-                            comp_name = next((c['기업명'] for c in target_companies if str(c['종목코드']).zfill(6) == code), code)
+                            comp_name = name_by_code.get(code, code)
                             trade_history_logs.append({
                                 'date': date.strftime('%Y-%m-%d'),
                                 'type': '매수',
@@ -1533,47 +1641,23 @@ class QuantLogic:
                                 'total': total_cost
                             })
 
-        result_df = pd.DataFrame(portfolio_curve).set_index('Date')
-        bnh_df = pd.DataFrame(benchmark_curve).set_index('Date')
-        result_df = result_df[~result_df.index.duplicated(keep='last')]
-        bnh_df = bnh_df[~bnh_df.index.duplicated(keep='last')]
-        
-        final_df = result_df.rename(columns={'Strategy': 'Strategy_Value'}).join(bnh_df.rename(columns={'BnH': 'BnH_Value'}), how='outer')
-        final_df = final_df.ffill().fillna(initial_capital)
-        
-        final_df['Strategy'] = ((final_df['Strategy_Value'] - initial_capital) / initial_capital) * 100
-        final_df['BnH'] = ((final_df['BnH_Value'] - initial_capital) / initial_capital) * 100
-        
-        if not kospi_df.empty:
-            kospi_cut = kospi_df[kospi_df.index >= sim_dates[0]].copy()
-            if not kospi_cut.empty:
-                base_k = kospi_cut.iloc[0]['KOSPI']
-                kospi_cut['KOSPI_Pct'] = ((kospi_cut['KOSPI'] - base_k) / base_k) * 100
-                final_df = final_df.join(kospi_cut[['KOSPI_Pct']], how='left')
-                final_df = final_df.rename(columns={'KOSPI_Pct': 'KOSPI'})
-        
-        final_df = final_df.ffill().fillna(0)
-        
-        # Track final returns for benchmarks
-        final_strategy_pct = final_df.iloc[-1]['Strategy'] if not final_df.empty else 0
-        final_bnh_pct = final_df.iloc[-1]['BnH'] if not final_df.empty else 0
-        final_kospi_pct = final_df.iloc[-1]['KOSPI'] if not final_df.empty and 'KOSPI' in final_df.columns else 0
+        return {
+            "portfolio_curve": portfolio_curve,
+            "benchmark_curve": benchmark_curve,
+            "trade_count": trade_count,
+            "win_count": win_count,
+            "total_profit": total_profit,
+            "total_loss": total_loss,
+            "trade_history_logs": trade_history_logs,
+        }
 
-        detailed_stats = self.calculate_advanced_stats(final_df['Strategy_Value'], trade_count, win_count, total_profit, total_loss)
-        
-        # Add benchmarks to stats for AI comparison
-        detailed_stats["BnH Return"] = f"{final_bnh_pct:.2f}%"
-        detailed_stats["KOSPI Return"] = f"{final_kospi_pct:.2f}%"
-
-        mc_results = {}
-        if mc_period_str and mc_period_str != "안함":
-            mc_results = self.run_monte_carlo(final_df['Strategy_Value'], mc_period_str)
-
+    def _detect_recent_signals(self, processed_data, name_by_code):
+        """각 종목 최근 5거래일에서 매수/매도 신호를 스캔한다."""
         recent_signals = {'buy': [], 'sell': []}
         for code, info in processed_data.items():
             df = info['df']
             if df.empty or len(df) < 5: continue
-            comp_name = next((c['기업명'] for c in target_companies if str(c['종목코드']).zfill(6) == code), code)
+            comp_name = name_by_code.get(code, code)
             recent_df = df.iloc[-5:]
             for dt, row in recent_df.iterrows():
                 try:
@@ -1581,8 +1665,83 @@ class QuantLogic:
                         recent_signals['buy'].append({'date': dt.strftime('%Y-%m-%d'), 'code': code, 'name': comp_name, 'price': int(row['Close'])})
                     if self.evaluate_logic(info['s_logic'], row):
                         recent_signals['sell'].append({'date': dt.strftime('%Y-%m-%d'), 'code': code, 'name': comp_name, 'price': int(row['Close'])})
-                except Exception as e: 
+                except Exception as e:
                     return {"error": f"최근 신호 감지 중 로직 에러 발생: {str(e)}"}
+        return recent_signals
+
+    def run_backtest_logic(self, target_companies, buy_logic, sell_logic, period_months, mc_period_str, portfolio_strategy='equal_weight', use_tax_fee=False, dart_key='', progress_callback=None):
+        fetch_years = (period_months / 12) + 2
+        name_by_code = {str(c['종목코드']).zfill(6): c.get('기업명', str(c['종목코드']).zfill(6))
+                        for c in target_companies}
+
+        event_map = self._collect_dart_events(
+            target_companies, buy_logic, sell_logic,
+            period_months, dart_key, progress_callback)
+
+        if progress_callback: progress_callback(5, f"KOSPI 지수 및 기초 데이터 수집 중...")
+        kospi_df = CrawlerUtil.fetch_kospi_index(years=fetch_years)
+        if not kospi_df.empty:
+            kospi_df = kospi_df[['Close']].rename(columns={'Close': 'KOSPI'})
+
+        processed_data = self._prepare_company_data(
+            target_companies, buy_logic, sell_logic,
+            fetch_years, event_map, progress_callback)
+
+        if not processed_data:
+            return {"error": "데이터 수집 실패"}
+
+        all_dates_raw = sorted(list(set().union(*[v['df'].index for v in processed_data.values()])))
+        end_date = datetime.today()
+        start_date = end_date - timedelta(days=period_months * 30)
+        sim_dates = [d for d in all_dates_raw if start_date <= d <= end_date]
+
+        if not sim_dates:
+            return {"error": "선택한 기간에 해당하는 데이터가 충분하지 않습니다."}
+
+        if progress_callback: progress_callback(45, "데이터 수집 완료. 백테스트 일별 시뮬레이션을 시작합니다...")
+
+        sim = self._run_daily_simulation(
+            processed_data, sim_dates, portfolio_strategy,
+            use_tax_fee, name_by_code, progress_callback)
+        if "error" in sim:
+            return sim
+
+        result_df = pd.DataFrame(sim['portfolio_curve']).set_index('Date')
+        bnh_df = pd.DataFrame(sim['benchmark_curve']).set_index('Date')
+        result_df = result_df[~result_df.index.duplicated(keep='last')]
+        bnh_df = bnh_df[~bnh_df.index.duplicated(keep='last')]
+
+        final_df = result_df.rename(columns={'Strategy': 'Strategy_Value'}).join(bnh_df.rename(columns={'BnH': 'BnH_Value'}), how='outer')
+        final_df = final_df.ffill().fillna(self.INITIAL_CAPITAL)
+
+        final_df['Strategy'] = ((final_df['Strategy_Value'] - self.INITIAL_CAPITAL) / self.INITIAL_CAPITAL) * 100
+        final_df['BnH'] = ((final_df['BnH_Value'] - self.INITIAL_CAPITAL) / self.INITIAL_CAPITAL) * 100
+
+        if not kospi_df.empty:
+            kospi_cut = kospi_df[kospi_df.index >= sim_dates[0]].copy()
+            if not kospi_cut.empty:
+                base_k = kospi_cut.iloc[0]['KOSPI']
+                kospi_cut['KOSPI_Pct'] = ((kospi_cut['KOSPI'] - base_k) / base_k) * 100
+                final_df = final_df.join(kospi_cut[['KOSPI_Pct']], how='left')
+                final_df = final_df.rename(columns={'KOSPI_Pct': 'KOSPI'})
+
+        final_df = final_df.ffill().fillna(0)
+
+        final_bnh_pct = final_df.iloc[-1]['BnH'] if not final_df.empty else 0
+        final_kospi_pct = final_df.iloc[-1]['KOSPI'] if not final_df.empty and 'KOSPI' in final_df.columns else 0
+
+        detailed_stats = self.calculate_advanced_stats(final_df['Strategy_Value'], sim['trade_count'], sim['win_count'], sim['total_profit'], sim['total_loss'])
+
+        detailed_stats["BnH Return"] = f"{final_bnh_pct:.2f}%"
+        detailed_stats["KOSPI Return"] = f"{final_kospi_pct:.2f}%"
+
+        mc_results = {}
+        if mc_period_str and mc_period_str != "안함":
+            mc_results = self.run_monte_carlo(final_df['Strategy_Value'], mc_period_str)
+
+        recent_signals = self._detect_recent_signals(processed_data, name_by_code)
+        if "error" in recent_signals:
+            return recent_signals
 
         # Prepare for JSON
         final_df.reset_index(inplace=True)
@@ -1594,5 +1753,5 @@ class QuantLogic:
             "returns_data": final_data,
             "mc_results": mc_results,
             "recent_signals": recent_signals,
-            "trade_history": trade_history_logs # Added trade logs
+            "trade_history": sim['trade_history_logs'],
         }
