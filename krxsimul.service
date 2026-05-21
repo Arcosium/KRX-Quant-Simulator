@@ -1,0 +1,20 @@
+# systemd 유닛 — sudo cp 로 /etc/systemd/system/krxsimul.service 설치 후 enable --now.
+# krxsimul.ai-ve.uk (Cloudflare hyfe-iqc 터널) -> 127.0.0.1:8501 로 프록시됨.
+[Unit]
+Description=KRX Quant Simulator (krxsimul.ai-ve.uk)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/projects/KRX Quant Simulator
+# APP_PORT 만 주면 app.py 가 해당 포트로 바인딩한다. (외부 직접 접근은 OCI SG 가 차단)
+Environment=APP_PORT=8501
+ExecStart=/usr/bin/python3 app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
